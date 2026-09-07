@@ -310,7 +310,7 @@ function ssSet(k,v){try{sessionStorage.setItem(k,v);}catch(e){SESSSTORE[k]=v;}}
 
 /* Optional: hardcode your settings here so every visitor is connected with no
    setup at all. Leave null to configure from the Data panel instead. */
-var CLOUD_PRESET=null;
+var CLOUD_PRESET={mode:'supabase',url:'https://slgajzokzlbcxssybtbd.supabase.co',key:'sb_publishable_yEx9V59kESTmy_08mLFuRA_xJZo1Kl8',table:'po_state',row:'main'};
 /* example:
 var CLOUD_PRESET={mode:'supabase',url:'https://xxxx.supabase.co',
   key:'eyJhbGciOi...your anon public key...',table:'po_state',row:'main'};
@@ -356,7 +356,12 @@ function hasArtifactStore(){
 
 /* ---------- supabase REST helpers ---------- */
 function sbHeaders(c,extra){
-  var h={'apikey':c.key,'Authorization':'Bearer '+c.key,'Content-Type':'application/json'};
+  /* The apikey header is what the gateway authenticates on. Authorization:Bearer
+     is only added for legacy JWT keys (eyJ...); the newer publishable keys
+     (sb_publishable_...) are not JWTs and some gateways reject them as bearer
+     tokens with a 401, so we deliberately leave that header off for those. */
+  var h={'apikey':c.key,'Content-Type':'application/json'};
+  if(/^eyJ/.test(String(c.key||'')))h['Authorization']='Bearer '+c.key;
   if(extra)for(var k in extra)h[k]=extra[k];
   return h;}
 function sbUrl(c){
@@ -587,8 +592,14 @@ function cloudSetupModal(){
       },900);
     },function(err){
       msg.style.color='var(--red)';
-      msg.textContent='\u2717 '+((err&&err.message)||'Could not connect')+
-        '  \u2014 check the URL, the anon key, that the table exists, and that the RLS policy allows access.';});};}
+      var em=(err&&err.message)||'Could not connect';
+      var hint=' \u2014 check the URL, the key, that the po_state table exists, and that the RLS policy allows access.';
+      if(/401|Invalid API key/i.test(em))
+        hint=' \u2014 the key was rejected. In Supabase go to Settings \u2192 API Keys, open the "Legacy API keys" tab, and copy the "anon public" key (it starts with eyJ). Paste that here instead.';
+      if(/404/.test(em))
+        hint=' \u2014 the table was not found. Run the create table po_state SQL in the Supabase SQL Editor first.';
+      msg.style.color='var(--red)';
+      msg.textContent='\u2717 '+em+hint;});};}
 
 function cloudShareLink(){
   if(!CLOUD||!CLOUD.url)return '';
