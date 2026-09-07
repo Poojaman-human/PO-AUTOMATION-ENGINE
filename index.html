@@ -476,6 +476,37 @@ function updateSyncBadge(){
   b.title=CLOUD_OK?'Click to manage the shared database':'Click to connect a shared database';
   var d=$('#DP');if(d&&d.classList.contains('on'))renderDataPanel();}
 
+/* ---------- forgiving paste handling ----------
+   People paste whole lines off the Supabase dashboard
+   (NEXT_PUBLIC_SUPABASE_URL=https://x.supabase.co), and copying from a web page
+   can carry zero-width characters that survive .trim() and break a naive regex.
+   Rather than making the user hunt for an invisible character, pull the value
+   out of whatever arrives. */
+function stripInvisible(v){
+  return String(v==null?'':v)
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g,'')  /* zero-width + BOM */
+    .replace(/[\u00A0\u2028\u2029]/g,' ')          /* nbsp, line/para separators */
+    .trim();}
+function cleanPlain(v){return stripInvisible(v).replace(/^["'`]+|["'`]+$/g,'');}
+function cleanUrlInput(v){
+  var t=cleanPlain(v);
+  if(!t)return '';
+  /* pull the first URL out of a pasted env line or code snippet */
+  var m=t.match(/https?:\/\/[^\s"'`,;)]+/i);
+  if(m)t=m[0];
+  else{
+    t=t.replace(/^[A-Z0-9_]+\s*[=:]\s*/i,'');            /* KEY= prefix */
+    t=t.replace(/^[^A-Za-z0-9]+/,'');                     /* leading junk */
+    if(/^[A-Za-z0-9-]+\.[A-Za-z0-9.-]+/.test(t))t='https://'+t;  /* bare host */
+  }
+  return t.replace(/\/+$/,'').replace(/\/rest\/v1.*$/i,'');}
+function cleanKeyInput(v){
+  var t=cleanPlain(v);
+  if(!t)return '';
+  var m=t.match(/(sb_publishable_[A-Za-z0-9_\-]+|sb_secret_[A-Za-z0-9_\-]+|eyJ[A-Za-z0-9_\-\.]+)/);
+  if(m)return m[0];
+  return t.replace(/^[A-Z0-9_]+\s*[=:]\s*/i,'');}
+
 /* ---------- setup modal ---------- */
 function cloudSetupModal(){
   var c=CLOUD||{mode:'supabase',url:'',key:'',table:'po_state',row:'main'};
@@ -523,13 +554,21 @@ function cloudSetupModal(){
     clearCloudCfg();closeM();renderPage();toast('Disconnected \u2014 local storage only');};
   $('#cs_save').onclick=function(){
     var cfg={mode:'supabase',
-      url:($('#cs_url').value||'').trim().replace(/\/+$/,''),
-      key:($('#cs_key').value||'').trim(),
-      table:($('#cs_table').value||'po_state').trim(),
-      row:($('#cs_row').value||'main').trim()};
+      url:cleanUrlInput($('#cs_url').value),
+      key:cleanKeyInput($('#cs_key').value),
+      table:cleanPlain($('#cs_table').value)||'po_state',
+      row:cleanPlain($('#cs_row').value)||'main'};
     var msg=$('#cs_msg');
-    if(!cfg.url||!cfg.key){msg.style.color='var(--red)';msg.textContent='Project URL and anon key are both required.';return;}
-    if(!/^https:\/\//.test(cfg.url)){msg.style.color='var(--red)';msg.textContent='The URL should start with https://';return;}
+    /* show the user what we actually parsed out of whatever they pasted */
+    if(cfg.url)$('#cs_url').value=cfg.url;
+    if(cfg.key)$('#cs_key').value=cfg.key;
+    if(!cfg.url||!cfg.key){msg.style.color='var(--red)';msg.textContent='Project URL and key are both required.';return;}
+    if(!/^https?:\/\/[^\s]+\.[^\s]+/.test(cfg.url)){
+      msg.style.color='var(--red)';
+      msg.textContent='That does not look like a project URL. It should be like https://abcdefgh.supabase.co';return;}
+    if(/^sb_secret_/.test(cfg.key)){
+      msg.style.color='var(--red)';
+      msg.textContent='That is the SECRET key. Use the publishable key (sb_publishable_...) - the secret one must never go in a web page.';return;}
     msg.style.color='var(--muted)';msg.textContent='Testing connection\u2026';
     sbRead(cfg).then(function(res){
       msg.style.color='var(--grn)';
