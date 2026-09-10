@@ -234,6 +234,9 @@ tbody tr:last-child td{border-bottom:none}
 .sheetview td.selc{outline:2px solid var(--pri2);outline-offset:-2px;background:rgba(68,114,196,.2)!important}
 .sheetview .rowno{background:var(--surf2);color:var(--muted);font-weight:800;font-size:11px;text-align:center;position:sticky;left:0;z-index:1;cursor:default;min-width:38px}
 .sheetview thead th{font-size:10px}
+.sheetview .stickcol{position:sticky;left:38px;background:var(--surf);z-index:2;min-width:96px;box-shadow:2px 0 0 var(--bdr)}
+.sheetview thead .stickcol{z-index:3;background:var(--surf2)}
+.sheetview tbody tr:hover .stickcol{background:var(--surf2)}
 .warnbar{display:flex;align-items:flex-start;gap:10px;padding:11px 14px;border-radius:10px;background:rgba(232,112,58,.09);border:1px solid rgba(232,112,58,.35);color:var(--acc);font-size:12px;line-height:1.55;margin-bottom:16px}
 .warnbar b{color:var(--acc)}
 .dpanel{position:fixed;top:58px;right:14px;z-index:95;width:300px;background:var(--surf);border:1px solid var(--bdr);border-radius:12px;box-shadow:0 14px 38px rgba(10,15,30,.25);padding:15px;display:none}
@@ -703,12 +706,73 @@ function sendOne(email,key,subject,message){
       .then(function(r){return r.json().then(function(j){if(r.ok&&j.success)toast('Emailed '+email);else toast('Email send failed for '+email+' — check Web3Forms key',true);});})
       .catch(function(){toast('Email send failed for '+email,true);});
   }else{
-    var url='mailto:'+encodeURIComponent(email)+'?subject='+encodeURIComponent(subject)+'&body='+encodeURIComponent(message);
-    window.open(url,'_blank');
-    toast('No key for '+email+' — opened a draft instead');}}
-function sendNotification(role,subject,message){
-  var list=notifyList(role);
-  for(var i=0;i<list.length;i++){if(list[i].email)sendOne(list[i].email,list[i].key,subject,message);}}
+    openDraft([email],subject,message);}}
+
+/* ONE draft for all keyless recipients, opened AFTER the UI has repainted.
+   Opening a mailto: per recipient inline was the reason an approval felt like it
+   had not registered - each window.open steals focus, and several in a row get
+   throttled or popup-blocked, so the click appeared to do nothing. */
+function openDraft(emails,subject,message){
+  var to=emails.filter(Boolean).join(',');
+  if(!to)return;
+  setTimeout(function(){
+    try{
+      var url='mailto:'+encodeURIComponent(to)+'?subject='+encodeURIComponent(String(subject).replace(/&middot;/g,'\u00b7').replace(/&[a-z]+;/g,' '))+
+        '&body='+encodeURIComponent(message);
+      window.open(url,'_blank');
+      toast('Opened a draft for '+emails.length+' recipient'+(emails.length!==1?'s':''));
+    }catch(e){toast('Could not open a mail draft',true);}
+  },0);}
+
+/* Split recipients: keyed ones send silently in the background, keyless ones are
+   collected into a single deferred draft. */
+function dispatch(list,subject,message){
+  if(!list||!list.length)return;
+  var drafts=[];
+  for(var i=0;i<list.length;i++){
+    if(!list[i]||!list[i].email)continue;
+    if(list[i].key)sendOne(list[i].email,list[i].key,subject,message);
+    else drafts.push(list[i].email);}
+  if(drafts.length)openDraft(drafts,subject,message);}
+function sendNotification(role,subject,message){dispatch(notifyList(role),subject,message);}
+
+/* ===== STEP NOTIFICATIONS =====
+   Every meaningful movement can raise an email. Recipients are held per event
+   type so people can subscribe to the bits they care about rather than all of
+   it - a planner who gets emailed about every GRN update stops reading them.
+   Events: created, approved, rejected, qc, stage, remark, golive */
+var NOTIFY_EVENTS=[
+  {k:'created',l:'PO raised',d:'A buyer submits a new PO request'},
+  {k:'approved',l:'Planning approved',d:'A PO passes Planning'},
+  {k:'rejected',l:'Planning rejected',d:'A PO is turned down'},
+  {k:'qc',l:'QC decision',d:'QC approves, rejects or flags a delay'},
+  {k:'stage',l:'Stage advanced',d:'A PO moves to the next milestone'},
+  {k:'remark',l:'Operations remark',d:'Someone adds a remark to a PO'},
+  {k:'golive',l:'Go Live',d:'A PO reaches Go Live or Completed'}];
+
+function eventList(evt){
+  if(!DB.prefs.notifyEvents)DB.prefs.notifyEvents={};
+  return DB.prefs.notifyEvents[evt]||[];}
+
+function notifyEvent(evt,subject,message,po){
+  var list=eventList(evt);
+  if(!list.length)return;
+  dispatch(list,subject,message);
+  logA('Notified',(po&&po.poNumber)||'',evt+' \u2192 '+list.length+' recipient'+(list.length!==1?'s':''));}
+
+function poLine(po){
+  return 'PO: '+po.poNumber+'\nSupplier: '+po.supplier+'\nBrand: '+po.brand+
+    '\nType: '+po.type+'\nTerritory: '+po.territory+
+    '\nValue: '+po.currency+' '+(po.value||0).toLocaleString()+
+    (po.trackerRow?('\nTracker row: '+po.trackerRow):'')+
+    '\nStage: '+po.stage+'\nApproval: '+po.approval;}
+
+function notifyStage(po,from,to){
+  notifyEvent('stage','PO moved to '+to+' \u00b7 '+po.poNumber,
+    po.poNumber+' has moved from "'+from+'" to "'+to+'".\n\n'+poLine(po),po);
+  if(to==='Go Live'||to==='Completed')
+    notifyEvent('golive','PO is live \u00b7 '+po.poNumber,
+      po.poNumber+' has reached '+to+'.\n\n'+poLine(po),po);}
 
 
 /* ===== TERRITORY RRP CONFIG ===== */
@@ -1350,8 +1414,18 @@ function engStep3(c){
     ['APP Import Currency',ENG.cur,'stat'],['APP',hasQty?fmt(R.app):'<i style="color:var(--muted)">MP &mdash; leave blank</i>',hasQty?'auto':''],
     ['PO Creation Entity',cfg.entity,'stat'],['Delivery Country',ENG.terr,'stat'],['Vendor Name',ENG.vname,''],
     ['Delivery WH Location',ENG.terr,'stat'],['Item Classification','<i style="color:var(--muted)">Fill manually</i>',''],
-    ['ROW No','<i style="color:var(--muted)">Fill manually</i>',''],['PO Request Date','<i style="color:var(--muted)">Fill manually</i>',''],
-    ['Currency',ENG.cur,'stat'],['Territory',ENG.terr,'stat']];
+    /* ROW No comes from the live GO LIVE 2 sheet. Before the PO is raised this is
+       the row it WILL take, so it is labelled as provisional - if a colleague
+       raises one first it shifts, and a number read as final would be wrong. */
+    ['ROW No',(gtOn()
+        ?(GTSTATE.nextRow
+            ?('<b>'+GTSTATE.nextRow+'</b> <i style="color:var(--muted)">(next free row in GO LIVE 2)</i>')
+            :'<i style="color:var(--muted)">reading the tracker\u2026</i>')
+        :'<i style="color:var(--muted)">connect the Google tracker to fill this</i>'),
+      gtOn()&&GTSTATE.nextRow?'auto':''],
+    ['PO Request Date',new Date().toISOString().slice(0,10),'auto'],
+    ['Currency',ENG.cur,'stat'],['Territory',ENG.terr,'stat'],
+    ['Margin %',ENG.margin+'%','auto']];
   var thtml='';for(var s=0;s<srows.length;s++)thtml+='<tr><td class="lbl">'+srows[s][0]+'</td><td class="'+(srows[s][2]||'')+'">'+srows[s][1]+'</td></tr>';
   sc.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">'+
     '<h3 style="font-weight:800">Summary &middot; '+region+'</h3>'+
@@ -1654,7 +1728,9 @@ function downloadExcel(){
     headers:R.headers,data:R.data,kept:D.kept,dropped:D.dropped,
     cfg:R.cfg,hasQty:R.hasQty,hasBarcode:R.hasBarcode,
     cur:ENG.cur,margin:ENG.margin,terr:ENG.terr,type:ENG.type,vname:ENG.vname,dept:ENG.dept,
-    dummyRRP:ENG.dummyRRP!==false},null);
+    dummyRRP:ENG.dummyRRP!==false,
+    createdDate:new Date().toISOString().slice(0,10),
+    nextRow:(gtOn()&&GTSTATE.nextRow)?GTSTATE.nextRow:null},null);
   logA('Downloaded Excel','Engine',ENG.vname+' | kept '+D.kept.length+', dropped '+D.dropped.length);}
 
 /* Context-driven workbook build. Used by the buyer straight after processing and
@@ -1804,6 +1880,13 @@ function buildWorkbookFromCtx(CTX,poNumber){
   setCell(ws2,6,1,cfg.entity,false,SUM_VAL_STYLE);setCell(ws2,7,1,ENGX.terr,false,SUM_VAL_STYLE);
   setCell(ws2,8,1,ENGX.vname,false,SUM_VAL_STYLE);setCell(ws2,9,1,ENGX.terr,false,SUM_VAL_STYLE);
   for(var sv2=10;sv2<14;sv2++)setCell(ws2,sv2,1,'',false,SUM_VAL_STYLE);
+  /* ROW No is the row this PO occupies in the GO LIVE 2 sheet. For a PO already
+     written it is the allocated row; for a download taken before the PO is
+     raised it is the row it WILL take, marked as pending so nobody reads a
+     provisional number as final. */
+  if(CTX.trackerRow)setCell(ws2,11,1,CTX.trackerRow,false,SUM_VAL_STYLE);
+  else if(CTX.nextRow)setCell(ws2,11,1,String(CTX.nextRow)+' (next free row)',false,SUM_VAL_STYLE);
+  setCell(ws2,12,1,CTX.createdDate||'',false,SUM_VAL_STYLE);
   setCell(ws2,13,1,ENGX.cur,false,SUM_VAL_STYLE);
   setCell(ws2,14,1,ENGX.terr,false,SUM_VAL_STYLE);
   setCell(ws2,15,1,keptRows.length,false,SUM_VAL_STYLE);
@@ -1884,6 +1967,14 @@ function createPOFromEngine(){
     totalOptions:R.totalOpts,totalQty:R.hasQty?R.totalQty:0,app:R.app||0,terrPricing:terrPricing,
     sheet:buildSheetSnapshot(R)};
   DB.pos.unshift(po);sv();logA('Created PO','Engine',po.trackingId);
+  /* Put the row in the shared tracker straight away - before Planning approval -
+     so the team can start filling V..BI while the approval is still pending.
+     Silent: a bridge outage must not block raising a PO, and it can be re-synced
+     from the tracker page. */
+  if(gtOn())gtPushPO(po,true).then(function(r){
+    if(r&&r.row)toast('Added to Google tracker at row '+r.row);});
+  notifyEvent('created','New PO raised \u00b7 '+po.poNumber,
+    'A new PO request has been raised and is awaiting Planning approval.\n\n'+poLine(po),po);
   sendNotification('planning','New PO Request &middot; '+po.poNumber,
     'A new PO request has been submitted and is awaiting Planning approval.\n\nPO Number: '+po.poNumber+'\nSupplier: '+po.supplier+'\nBrand: '+po.brand+'\nType: '+po.type+'\nTerritory: '+po.territory+'\nValue: '+po.currency+' '+(po.value||0).toLocaleString());
   ENG.step=1;ENG.result=null;toast('PO created: '+po.trackingId);
@@ -1944,13 +2035,21 @@ function ctxFromSnapshot(sn){
     kept:sn.kept.map(unpack),dropped:sn.dropped.map(unpack),
     cfg:sn.cfg,hasQty:sn.hasQty,hasBarcode:sn.hasBarcode,
     cur:sn.cur,margin:sn.margin,terr:sn.terr,type:sn.type,vname:sn.vname,dept:sn.dept,
-    dummyRRP:sn.dummyRRP,totals:sn.totals,counts:sn.counts};}
+    dummyRRP:sn.dummyRRP,totals:sn.totals,counts:sn.counts,
+    trackerRow:sn._trackerRow||null,nextRow:(gtOn()&&GTSTATE.nextRow)?GTSTATE.nextRow:null,
+    createdDate:sn._createdDate||''};}
 
 /* ===== REVIEW CHECKS =====
    Surfaces the things a planner would otherwise have to open the file to see. */
 function reviewChecks(sn){
   var out=[],i,rw;
-  var all=sn.kept.concat(sn.dropped);
+  /* Tolerate partial snapshots. An older or hand-edited PO can arrive without a
+     dropped array, and concat(undefined) yields [undefined] - which then threw
+     on the first property read and took the whole Planning page down with it.
+     A review panel must never be the reason a page fails to render. */
+  var kept=Array.isArray(sn.kept)?sn.kept:[];
+  var drop=Array.isArray(sn.dropped)?sn.dropped:[];
+  var all=kept.concat(drop).filter(function(r){return r&&typeof r==='object';});
   var cur=sn.cur||'';
 
   /* --- RRP check --- */
@@ -2001,6 +2100,8 @@ function reviewChecks(sn){
 
 /* ===== SHARED SUMMARY BLOCK (buyer, planning, operations) ===== */
 function summaryTableHTML(sn){
+  if(!sn.totals)sn.totals={};
+  if(!sn.counts)sn.counts={};
   function fmt(n){return n==null?'&mdash;':parseFloat(n).toLocaleString(undefined,{maximumFractionDigits:2,minimumFractionDigits:2});}
   var t=sn.totals||{},cts=sn.counts||{};
   var hasQty=sn.hasQty;
@@ -2016,6 +2117,7 @@ function summaryTableHTML(sn){
     ['Delivery WH Location',sn.terr,'stat'],
     ['Rows in PO Sheet',cts.kept,'auto'],['Rows Dropped',cts.dropped,cts.dropped?'stat':''],
     ['Rows in Original',cts.original,''],
+    ['ROW No (GO LIVE 2)',(sn._trackerRow?('<b>'+sn._trackerRow+'</b>'):(GTSTATE.nextRow?(GTSTATE.nextRow+' <i style="color:var(--muted)">(next free row)</i>'):'<i style="color:var(--muted)">connect the Google tracker</i>')),'stat'],
     ['Currency',sn.cur,'stat'],['Territory',sn.terr,'stat']];
   var h='';
   for(var i=0;i<rows.length;i++)h+='<tr><td class="lbl">'+rows[i][0]+'</td><td class="'+(rows[i][2]||'')+'">'+(rows[i][1]==null?'&mdash;':rows[i][1])+'</td></tr>';
@@ -2057,6 +2159,11 @@ var SHEET_VIEW_ROWS=250;
    would find after opening the downloaded file. Kept in one place so the two
    can never drift apart. */
 function viewerColumns(sn){
+  if(!sn.headers)sn.headers=[];
+  if(!Array.isArray(sn.kept))sn.kept=[];
+  if(!Array.isArray(sn.dropped))sn.dropped=[];
+  if(!Array.isArray(sn.original))sn.original=[];
+  if(!sn.counts)sn.counts={kept:sn.kept.length,dropped:sn.dropped.length,original:sn.original.length};
   function L(c){var s='';c++;while(c>0){c--;s=String.fromCharCode(65+(c%26))+s;c=Math.floor(c/26);}return s;}
   var h=sn.headers,origLen=h.length,cols=[],i;
   for(i=0;i<origLen;i++)cols.push({label:h[i],kind:'orig',idx:i});
@@ -2117,6 +2224,7 @@ function sheetViewerModal(po,opts){
   opts=opts||{};
   var sn=po.sheet;
   if(!sn){toast('No sheet stored for this PO',true);return;}
+  sn._trackerRow=po.trackerRow||null;sn._createdDate=po.createdDate||'';
   var V=viewerColumns(sn);
   var showAllFormulas=false;
   var m=el('div','modal');m.style.maxWidth='1180px';
@@ -2129,6 +2237,7 @@ function sheetViewerModal(po,opts){
           '<button class="dtab" data-t="summary">Summary</button>'+
           '<button class="dtab" data-t="dropped">Dropped ('+sn.counts.dropped+')</button>'+
           '<button class="dtab" data-t="original">Original ('+sn.counts.original+')</button>'+
+          '<button class="dtab" data-t="remarks">Remarks ('+allRemarks(po).length+')</button>'+
         '</div>'+
         '<label id="svFxWrap" style="display:flex;align-items:center;gap:6px;font-size:12px;font-weight:700;cursor:pointer;margin-left:auto">'+
           '<input type="checkbox" id="svFxAll" style="width:15px;height:15px"> Show all formulas</label>'+
@@ -2222,6 +2331,11 @@ function sheetViewerModal(po,opts){
   function draw(tab){
     var body=$('#svBody');
     $('#svFxWrap').style.display=(tab==='po')?'flex':'none';
+    if(tab==='remarks'){
+      setBar('','','');
+      body.innerHTML='';
+      body.appendChild(remarksPanel(po,'viewer'));
+      return;}
     if(tab==='summary'){
       setBar('','','');
       body.innerHTML='<div class="dgrid dg21" style="margin:0">'+
@@ -2267,23 +2381,77 @@ function sheetViewerModal(po,opts){
 function downloadPOExcel(po){
   if(!po.sheet){toast('No sheet stored for this PO - it was raised before sheet storage was added',true);return;}
   if(!xlsxReady()){toast('Excel library blocked by your network',true);return;}
+  /* stamp the live tracker row onto the snapshot so the Summary tab carries it */
+  po.sheet._trackerRow=po.trackerRow||null;
+  po.sheet._createdDate=po.createdDate||'';
   buildWorkbookFromCtx(ctxFromSnapshot(po.sheet),po.poNumber);
   logA('Downloaded Excel',ST.role.charAt(0).toUpperCase()+ST.role.slice(1),po.poNumber);}
 
 /* ===== PLANNING ACTIONS (shared by card and viewer) ===== */
-function planningApprove(po){
+/* Approvals are independent - a PO can be approved in any order, on its own or
+   in bulk. State changes and the repaint happen first; everything slow (mail,
+   sheet sync) is deferred so a single click always lands immediately. */
+function approveOne(po){
+  if(po.approval==='Approved')return false;
   po.approval='Approved';
   if(po.stageIdx<=1){po.stageIdx=QC_STAGE_IDX;po.stage=FLOWS[po.type][QC_STAGE_IDX];}
-  sv();logA('Approved','Planning',po.poNumber);
-  sendNotification('operations','PO Approved &middot; '+po.poNumber,
-    'PO '+po.poNumber+' for '+po.supplier+' / '+po.brand+' has been APPROVED by Planning and is moving to the next stage.');
-  renderPage();toast('Approved '+po.poNumber);}
+  logA('Approved','Planning',po.poNumber);
+  return true;}
+
+function afterApprove(pos){
+  setTimeout(function(){
+    /* sheet sync is per PO - each needs its own row */
+    for(var i=0;i<pos.length;i++)if(gtOn())gtPushPO(pos[i],true);
+    /* mail is ONE message for the whole batch. Firing per PO per event meant
+       approving four POs opened eleven drafts, which is unusable. */
+    if(pos.length===1){
+      var po=pos[0];
+      notifyEvent('approved','PO approved \u00b7 '+po.poNumber,
+        po.poNumber+' has been approved by Planning. Operations now owns the remaining stages.\n\n'+poLine(po),po);
+      sendNotification('operations','PO Approved \u00b7 '+po.poNumber,
+        'PO '+po.poNumber+' for '+po.supplier+' / '+po.brand+' has been APPROVED by Planning.');
+    }else{
+      var lines=pos.map(function(p){
+        return '\u2022 '+p.poNumber+' \u2014 '+p.supplier+' / '+p.brand+' \u2014 '+p.currency+' '+(p.value||0).toLocaleString()+
+          (p.trackerRow?(' \u2014 row '+p.trackerRow):'');}).join('\n');
+      notifyEvent('approved',pos.length+' POs approved by Planning',
+        'Planning has approved '+pos.length+' POs:\n\n'+lines,pos[0]);
+      sendNotification('operations',pos.length+' POs approved',
+        'Planning has approved '+pos.length+' POs:\n\n'+lines);}
+  },0);}
+
+function planningApprove(po){
+  if(!approveOne(po)){toast('Already approved');return;}
+  sv();renderPage();toast('Approved '+po.poNumber);
+  afterApprove([po]);}
+
+function planningApproveMany(pos){
+  var done=[];
+  for(var i=0;i<pos.length;i++)if(approveOne(pos[i]))done.push(pos[i]);
+  if(!done.length){toast('Nothing to approve');return;}
+  sv();PLSEL={};renderPage();
+  toast('Approved '+done.length+' PO'+(done.length!==1?'s':''));
+  afterApprove(done);}
 function planningReject(po){
   var r=prompt('Rejection reason?');if(r==null)return;
   po.approval='Rejected';po.rejectReason=r;sv();logA('Rejected','Planning',po.poNumber+': '+r);
+  renderPage();
   sendNotification('operations','PO Rejected &middot; '+po.poNumber,
     'PO '+po.poNumber+' for '+po.supplier+' / '+po.brand+' has been REJECTED by Planning.\nReason: '+r);
-  renderPage();toast('Rejected');}
+  setTimeout(function(){
+    notifyEvent('rejected','PO rejected \u00b7 '+po.poNumber,
+      po.poNumber+' has been rejected by Planning.\nReason: '+r+'\n\n'+poLine(po),po);},0);
+  toast('Rejected '+po.poNumber);}
+
+function planningRejectMany(pos){
+  var r=prompt('Rejection reason for '+pos.length+' PO'+(pos.length!==1?'s':'')+'?');
+  if(r==null)return;
+  for(var i=0;i<pos.length;i++){pos[i].approval='Rejected';pos[i].rejectReason=r;
+    logA('Rejected','Planning',pos[i].poNumber+': '+r);}
+  sv();PLSEL={};renderPage();toast('Rejected '+pos.length+' PO'+(pos.length!==1?'s':''));
+  setTimeout(function(){
+    sendNotification('operations',pos.length+' POs rejected',
+      'Planning has rejected '+pos.length+' POs.\nReason: '+r+'\n\n'+pos.map(function(p){return '\u2022 '+p.poNumber;}).join('\n'));},0);}
 
 /* ===== WORKFLOW TRACKER ===== */
 var wfV=false;
@@ -2311,7 +2479,10 @@ function pgWFTracker(c,type){
       var prioCol=po.priority==='High'?'var(--red)':po.priority==='Medium'?'var(--yel)':'var(--grn)';
       var apprCls=po.approval==='Approved'?'tg-ok':po.approval==='Rejected'?'tg-no':'tg-pend';
       card.innerHTML='<div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:8px">'+
-        '<div><span class="tag '+cls+'">'+po.type+'</span> <b style="font-size:15px;color:var(--pri2)">'+po.poNumber+'</b></div>'+
+        '<div><span class="tag '+cls+'">'+po.type+'</span> <b style="font-size:15px;color:var(--pri2)">'+po.poNumber+'</b>'+
+          (gtSheetPoNumber(po)?' <span class="tag tg-ok" title="PO number entered in the Google sheet">PO '+gtSheetPoNumber(po)+'</span>':'')+
+          (po.trackerRow?' <span class="pill">sheet row '+po.trackerRow+'</span>':'')+
+          (allRemarks(po).length?' <span class="tag mp">&#128172; '+allRemarks(po).length+'</span>':'')+'</div>'+
         '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'+
           '<span style="color:var(--muted);font-size:12px">'+po.supplier+' &middot; '+po.brand+' &middot; '+po.currency+' '+(po.value||0).toLocaleString()+' &middot; &#128100; '+(po.buyer||'Unassigned')+'</span>'+
           '<span class="tag '+apprCls+'">'+po.approval+'</span>'+
@@ -2342,8 +2513,10 @@ function pgWFTracker(c,type){
             (po.pidBreakdown.unkCount?'<div><span style="color:var(--muted)">Unmatched barcode:</span> <b>'+po.pidBreakdown.unkCount+'</b></div>':'')+
           '</div>';
         card.appendChild(pb);}
-      /* QC info panel for Marketplace */
-      if(po.type==='Marketplace'){
+      /* QC info panel - both flows. Consignment's QC milestone is called
+         "Content / QC" but it is the same gate at the same index, so hiding this
+         for consignment left QC feedback invisible to everyone. */
+      if(true){
         var qp=el('div','');qp.style.cssText='margin-top:10px;padding:10px 12px;background:var(--surf2);border:1px solid var(--bdr);border-radius:9px;font-size:12px';
         var qcApprCls=po.qc.approval==='Approved'?'tg-ok':po.qc.approval==='Rejected'?'tg-no':'tg-pend';
         var delB=po.qc.delayed==='Yes'?'<span class="tag tg-no" style="margin-left:6px">&#9201; '+(po.qc.delayReason||'Delayed')+'</span>':'';
@@ -2359,6 +2532,9 @@ function pgWFTracker(c,type){
           (po.qc.comments?'<div style="margin-top:5px;color:var(--muted)"><b>Comment:</b> '+po.qc.comments+'</div>':'');
         card.appendChild(qp);
       }
+      /* remarks - same thread every other role sees */
+      card.appendChild(remarksPanel(po,'wf'+type));
+
       /* action buttons */
       var act=el('div','');act.style.cssText='display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center';
       if(po.stage!=='Completed'&&po.stage!=='Cancelled'){
@@ -2404,16 +2580,41 @@ function advStage(po){
   var flow=FLOWS[po.type];
   if(po.stageIdx===0&&po.approval!=='Approved'){toast('Needs Planning approval first',true);return;}
   if(po.stageIdx===QC_STAGE_IDX){
-    if(ST.role!=='qc'){toast('Only QC role can advance past '+flow[QC_STAGE_IDX],true);return;}
-    if(!po.qc||po.qc.approval!=='Approved'){toast('QC must be Approved before advancing',true);return;}
+    /* the gate is QC's SIGN-OFF, not QC's presence. Once QC has approved, the PO
+       belongs to Operations and they move it on - previously only the QC role
+       could advance, so every PO stalled here waiting for someone who had
+       already done their part. */
+    if(!po.qc||po.qc.approval!=='Approved'){
+      toast('QC must be Approved before this stage can be passed',true);return;}
+    if(ST.role!=='qc'&&ST.role!=='operations'&&ST.role!=='buyer'){
+      toast('Only QC or Operations can advance past '+flow[QC_STAGE_IDX],true);return;}
   }
   if(po.stageIdx<flow.length-1){
+    var from=po.stage;
     po.stageIdx++;po.stage=po.stageIdx===flow.length-1?'Completed':flow[po.stageIdx];
-    sv();logA('Advanced',po.type,po.poNumber+' -> '+po.stage);renderPage();toast('Stage: '+po.stage);}}
+    sv();logA('Advanced',po.type,po.poNumber+' -> '+po.stage);
+    notifyStage(po,from,po.stage);
+    if(gtOn())gtPushPO(po,true);
+    renderPage();toast('Stage: '+po.stage);}}
+
+/* move directly to a stage from the Operations checklist */
+function setStage(po,idx){
+  var flow=FLOWS[po.type];
+  if(idx<0||idx>flow.length-1)return;
+  if(po.approval!=='Approved'){toast('Needs Planning approval first',true);return;}
+  if(idx>QC_STAGE_IDX&&(!po.qc||po.qc.approval!=='Approved')){
+    toast('QC must be Approved before moving past '+flow[QC_STAGE_IDX],true);return;}
+  var from=po.stage;
+  po.stageIdx=idx;po.stage=idx>=flow.length-1?'Completed':flow[idx];
+  sv();logA('Stage set',po.type,po.poNumber+' -> '+po.stage);
+  notifyStage(po,from,po.stage);
+  if(gtOn())gtPushPO(po,true);
+  renderPage();toast('Stage: '+po.stage);}
 
 /* ===== PLANNING ===== */
+var PLSEL={},PLTAB='pending';
 function pgPlanning(c){
-  c.appendChild(el('div','ph','<h1>Planning Workspace</h1><p>Review each request in full &mdash; summary, splits, drops and checks &mdash; then approve without downloading anything.</p>'));
+  c.appendChild(el('div','ph','<h1>Planning Workspace</h1><p>Review each request in full, then approve. Any PO can be approved on its own or in bulk &mdash; there is no required order.</p>'));
   var pend=[],appr=[],rejt=[];
   for(var i=0;i<DB.pos.length;i++){var p=DB.pos[i];
     if(p.approval==='Pending'&&p.stage!=='Cancelled')pend.push(p);
@@ -2423,8 +2624,82 @@ function pgPlanning(c){
   var kd=[[pend.length,'Pending','var(--yel)','&#9680;'],[appr.length,'Approved','var(--grn)','&#10003;'],[rejt.length,'Rejected','var(--red)','&#10005;']];
   for(var ki=0;ki<kd.length;ki++)kg.appendChild(el('div','kpi','<div class="kt"><div><div class="kv">'+kd[ki][0]+'</div><div class="kl">'+kd[ki][1]+'</div></div><div class="ki" style="background:'+kd[ki][2]+'1a;color:'+kd[ki][2]+'">'+kd[ki][3]+'</div></div>'));
   c.appendChild(kg);
+  /* Planning used to show ONLY pending POs, so the moment one was approved it
+     vanished - along with any remark written on it. Tabs keep every PO reachable
+     from this view, which is where people go looking for their own notes. */
+  var tabsP=el('div','dtabs');tabsP.style.marginBottom='14px';
+  var counts={pending:pend.length,approved:appr.length,rejected:rejt.length,all:DB.pos.length};
+  var tabDefs=[['pending','Pending'],['approved','Approved'],['rejected','Rejected'],['all','All POs']];
+  tabsP.innerHTML=tabDefs.map(function(t){
+    return '<button class="dtab'+(PLTAB===t[0]?' on':'')+'" data-t="'+t[0]+'">'+t[1]+' ('+counts[t[0]]+')</button>';}).join('');
+  c.appendChild(tabsP);
+  var tp=tabsP.querySelectorAll('.dtab');
+  for(var ti=0;ti<tp.length;ti++){(function(btn){
+    btn.onclick=function(){PLTAB=btn.getAttribute('data-t');PLSEL={};renderPage();};})(tp[ti]);}
+
+  var shown=PLTAB==='pending'?pend:PLTAB==='approved'?appr:PLTAB==='rejected'?rejt:DB.pos.slice();
+  if(PLTAB!=='pending'){
+    c.appendChild(el('div','sec',tabDefs.filter(function(t){return t[0]===PLTAB;})[0][1]+' ('+shown.length+')'));
+    if(!shown.length){c.appendChild(el('div','tw','<div class="empty">Nothing here.</div>'));return;}
+    for(var vi=0;vi<shown.length;vi++){
+      (function(po){
+        var card=el('div','card');card.style.marginBottom='14px';
+        var cls2=po.type==='Marketplace'?'mp':'cn';
+        var ac2=po.approval==='Approved'?'tg-ok':po.approval==='Rejected'?'tg-no':'tg-pend';
+        card.innerHTML='<div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">'+
+          '<div><span class="tag '+cls2+'">'+po.type+'</span> <b style="color:var(--pri2)">'+po.poNumber+'</b>'+
+            (gtSheetPoNumber(po)?' <span class="tag tg-ok">PO '+gtSheetPoNumber(po)+'</span>':'')+
+            (po.trackerRow?' <span class="pill">row '+po.trackerRow+'</span>':'')+
+            '<div style="color:var(--muted);font-size:12px;margin-top:3px">'+po.supplier+' &middot; '+po.brand+' &middot; '+po.territory+' &middot; stage: '+po.stage+'</div></div>'+
+          '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap"><span class="tag '+ac2+'">'+po.approval+'</span>'+
+            (allRemarks(po).length?'<span class="tag mp">&#128172; '+allRemarks(po).length+'</span>':'')+'</div></div>';
+        card.appendChild(remarksPanel(po,'planall'));
+        if(po.sheet){
+          var act2=el('div','');act2.style.cssText='display:flex;gap:8px;margin-top:10px;flex-wrap:wrap';
+          var ob=el('button','btn bg bs','&#128202; Open sheet');ob.onclick=function(){sheetViewerModal(po,{});};
+          var db2=el('button','btn bg bs','&#11015; Download');db2.onclick=function(){downloadPOExcel(po);};
+          act2.appendChild(ob);act2.appendChild(db2);
+          if(po.approval==='Pending'){
+            var ap2=el('button','btn bp bs','&#10003; Approve');ap2.onclick=function(){planningApprove(po);};
+            act2.appendChild(ap2);}
+          card.appendChild(act2);}
+        c.appendChild(card);})(shown[vi]);}
+    return;}
+
   c.appendChild(el('div','sec','Pending Approvals'));
   if(!pend.length){c.appendChild(el('div','tw','<div class="empty">No pending approvals &#127881;</div>'));return;}
+
+  /* --- bulk bar --- */
+  var selIds=[];for(var q in PLSEL)if(PLSEL[q])selIds.push(q);
+  var bulk=el('div','card');bulk.style.cssText='margin-bottom:14px;padding:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap';
+  var selAll=document.createElement('input');selAll.type='checkbox';
+  selAll.style.cssText='width:16px;height:16px;cursor:pointer';
+  selAll.checked=(selIds.length===pend.length&&pend.length>0);
+  selAll.onchange=function(){
+    PLSEL={};
+    if(selAll.checked)for(var i=0;i<pend.length;i++)PLSEL[pend[i].id]=true;
+    renderPage();};
+  var lab=el('label','');lab.style.cssText='display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;cursor:pointer';
+  lab.appendChild(selAll);lab.appendChild(el('span','','Select all '+pend.length));
+  bulk.appendChild(lab);
+  bulk.appendChild(el('span','pill',selIds.length+' selected'));
+  var pickSelected=function(){
+    var out=[];for(var i=0;i<pend.length;i++)if(PLSEL[pend[i].id])out.push(pend[i]);return out;};
+  var bAp=el('button','btn bp','&#10003; Approve selected');
+  bAp.onclick=function(){var sel=pickSelected();
+    if(!sel.length){toast('Select at least one PO',true);return;}
+    if(!confirm('Approve '+sel.length+' PO'+(sel.length!==1?'s':'')+'?'))return;
+    planningApproveMany(sel);};
+  var bRj=el('button','btn bd','&#10005; Reject selected');
+  bRj.onclick=function(){var sel=pickSelected();
+    if(!sel.length){toast('Select at least one PO',true);return;}
+    planningRejectMany(sel);};
+  var bAll=el('button','btn bg','Approve all '+pend.length);
+  bAll.onclick=function(){
+    if(!confirm('Approve all '+pend.length+' pending PO'+(pend.length!==1?'s':'')+'?'))return;
+    planningApproveMany(pend.slice());};
+  bulk.appendChild(bAp);bulk.appendChild(bRj);bulk.appendChild(bAll);
+  c.appendChild(bulk);
   for(var pi=0;pi<pend.length;pi++){
     (function(po){
       var sn=po.sheet;
@@ -2434,14 +2709,24 @@ function pgPlanning(c){
 
       /* --- header --- */
       var head=el('div','');head.style.cssText='display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--bdr)';
+      var cbWrap=el('label','');cbWrap.style.cssText='display:flex;align-items:center;gap:9px;cursor:pointer';
+      var cb=document.createElement('input');cb.type='checkbox';
+      cb.checked=!!PLSEL[po.id];cb.style.cssText='width:17px;height:17px;cursor:pointer;flex-shrink:0';
+      cb.onchange=function(){PLSEL[po.id]=cb.checked;
+        var n=0;for(var z in PLSEL)if(PLSEL[z])n++;
+        var pill=head.querySelector('.selpill');if(pill)pill.textContent=n+' selected';};
       head.innerHTML='<div><span class="tag '+cls+'">'+po.type+'</span> <b style="font-size:15px;color:var(--pri2)">'+po.poNumber+'</b>'+
           '<div style="color:var(--muted);font-size:12px;margin-top:4px">'+po.supplier+' &middot; '+po.brand+' &middot; '+po.territory+
           ' &middot; '+(po.department||'&mdash;')+' &middot; &#128100; '+(po.buyer||'Unassigned')+' &middot; &#128197; '+(po.createdDate||'&mdash;')+'</div></div>'+
         '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'+
           '<span class="tag" style="background:'+prioCol+'1f;color:'+prioCol+'">'+po.priority+'</span>'+
+          (allRemarks(po).length?'<span class="tag mp">&#128172; '+allRemarks(po).length+' remark'+(allRemarks(po).length!==1?'s':'')+'</span>':'')+
           '<span class="tag tg-pend">Awaiting your approval</span></div>';
+      head.insertBefore(cbWrap,head.firstChild);
+      cbWrap.appendChild(cb);
       card.appendChild(head);
 
+      if(sn){sn._trackerRow=po.trackerRow||null;sn._createdDate=po.createdDate||'';}
       if(!sn){
         /* raised before sheet storage existed - fall back to the old brief card */
         card.appendChild(el('div','','<div style="padding:11px 13px;background:rgba(232,112,58,.08);border:1px solid rgba(232,112,58,.3);border-radius:9px;font-size:12px;color:var(--acc);line-height:1.55">'+
@@ -2486,6 +2771,9 @@ function pgPlanning(c){
         card.appendChild(grid);
       }
 
+      /* --- remarks --- */
+      card.appendChild(remarksPanel(po,'plan'));
+
       /* --- actions --- */
       var act=el('div','');act.style.cssText='display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;align-items:center';
       if(sn){
@@ -2507,18 +2795,41 @@ function pgPlanning(c){
 /* ===== OPERATIONS ===== */
 function pgOperations(c){
   c.appendChild(el('div','ph','<h1>Operations Workspace</h1><p>Update milestones. Commercial fields read-only.</p>'));
-  var active=[];for(var i=0;i<DB.pos.length;i++){var p=DB.pos[i];if(p.approval==='Approved'&&p.stage!=='Completed'&&p.stage!=='Cancelled')active.push(p);}
+  var active=[],waiting=[];
+  for(var i=0;i<DB.pos.length;i++){var p=DB.pos[i];
+    if(p.approval==='Approved'&&p.stage!=='Completed'&&p.stage!=='Cancelled')active.push(p);
+    else if(p.approval==='Pending'&&p.stage!=='Cancelled')waiting.push(p);}
+
+  /* POs still with Planning are shown here read-only. Operations cannot act on
+     them yet, but remarks written before approval are visible - previously they
+     were invisible on this screen until the PO was approved, which looked like
+     the remark had been lost. */
+  if(waiting.length){
+    c.appendChild(el('div','sec','&#9203; Awaiting Planning approval ('+waiting.length+') \u2014 view only'));
+    for(var wi=0;wi<waiting.length;wi++){
+      (function(po){
+        var card=el('div','card');card.style.cssText='margin-bottom:12px;border-left:4px solid var(--yel)';
+        card.innerHTML='<div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:center">'+
+          '<div><b>'+po.poNumber+'</b> <span class="tag '+(po.type==='Marketplace'?'mp':'cn')+'">'+po.type+'</span>'+
+          '<span style="color:var(--muted);font-size:12px"> &middot; '+po.supplier+' &middot; '+po.brand+' &middot; '+po.territory+'</span></div>'+
+          '<div style="display:flex;gap:6px;align-items:center"><span class="tag tg-pend">With Planning</span>'+
+          (allRemarks(po).length?'<span class="tag mp">&#128172; '+allRemarks(po).length+'</span>':'')+'</div></div>';
+        card.appendChild(remarksPanel(po,'opswait'));
+        c.appendChild(card);})(waiting[wi]);}
+    c.appendChild(el('div','sec','&#9881; Active \u2014 yours to move ('+active.length+')'));}
+
   if(!active.length){c.appendChild(el('div','tw','<div class="empty"><div class="big">&#9881;</div>No active POs.<br><span style="font-size:12px;color:var(--muted)">A PO shows up here once Planning has approved it (and it isn\'t Completed/Cancelled yet). If you\'re expecting one here, check the Planning queue — it may still be waiting on approval.</span></div>'));return;}
   for(var ai=0;ai<active.length;ai++){
     (function(po){
       var flow=FLOWS[po.type];var cls=po.type==='Marketplace'?'mp':'cn';
       var card=el('div','card');card.style.marginBottom='12px';
       card.innerHTML='<div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:8px">'+
-        '<div><b>'+po.poNumber+'</b> <span class="tag '+cls+'">'+po.type+'</span> <span style="color:var(--muted);font-size:12px">&middot; Stage: '+po.stage+' &middot; &#128100; '+(po.buyer||'Unassigned')+'</span></div></div>';
+        '<div><b>'+po.poNumber+'</b> <span class="tag '+cls+'">'+po.type+'</span> <span style="color:var(--muted);font-size:12px">&middot; Stage: '+po.stage+' &middot; &#128100; '+(po.buyer||'Unassigned')+'</span>'+
+        (allRemarks(po).length?' <span class="tag mp">&#128172; '+allRemarks(po).length+'</span>':'')+'</div></div>';
       card.appendChild(tlHTML(po,false));
       card.appendChild(tlStatus(po));
-      /* QC status panel */
-      if(po.type==='Marketplace'){
+      /* QC status panel - both flows */
+      if(true){
         var qp=el('div','');qp.style.cssText='margin-top:10px;padding:10px;background:var(--surf2);border:1px solid var(--bdr);border-radius:9px;font-size:12px';
         var qcApprCls2=po.qc.approval==='Approved'?'tg-ok':po.qc.approval==='Rejected'?'tg-no':'tg-pend';
         qp.innerHTML='<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:'+(po.qc.delayed==='Yes'?'8':'0')+'px">'+
@@ -2569,18 +2880,122 @@ function pgOperations(c){
       }else rev.appendChild(el('span','pill','No stored sheet for this PO'));
       card.appendChild(rev);
 
-      /* action */
-      var act=el('div','');act.style.cssText='display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center';
-      var curSt=flow[po.stageIdx];
-      if(po.stageIdx===QC_STAGE_IDX){
-        var qcAppr2=po.qc&&po.qc.approval;
-        act.appendChild(el('span','',qcAppr2==='Approved'?
-          '<span class="tag tg-ok">&#10003; '+curSt+' Approved &mdash; awaiting QC role to advance</span>':
-          '<span class="tag tg-pend">&#128274; Waiting for '+curSt+' approval'+(po.qc&&po.qc.delayed==='Yes'?' &mdash; &#9201; Delayed: '+(po.qc.delayReason||''):'')+'</span>'));
-      }else{var nxt=flow[po.stageIdx+1];
-        if(nxt){var b=el('button','btn bp bs','&#10003; Mark "'+nxt+'" done');b.onclick=function(){advStage(po);};act.appendChild(b);}}
-      card.appendChild(act);c.appendChild(card);
+      /* --- stage checklist: Operations owns everything after Planning --- */
+      var qcOk=!!(po.qc&&po.qc.approval==='Approved');
+      var chk=el('div','');chk.style.cssText='margin-top:12px;padding:12px;background:var(--surf2);border:1px solid var(--bdr);border-radius:10px';
+      var chkHtml='<div style="font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:9px">'+
+        'Stage checklist &mdash; tick as each step completes</div>';
+      chk.innerHTML=chkHtml;
+      var list=el('div','');list.style.cssText='display:flex;flex-direction:column;gap:4px';
+      for(var si=0;si<flow.length;si++){
+        (function(idx){
+          var done=idx<po.stageIdx||po.stage==='Completed';
+          var current=idx===po.stageIdx&&po.stage!=='Completed';
+          var isQC=idx===QC_STAGE_IDX;
+          var locked=(idx>QC_STAGE_IDX&&!qcOk);
+          var row=el('label','');
+          row.style.cssText='display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:7px;font-size:13px;'+
+            (current?'background:rgba(212,146,10,.1);font-weight:800;':'')+
+            (locked?'opacity:.45;cursor:not-allowed':'cursor:pointer');
+          var box=document.createElement('input');
+          box.type='checkbox';box.checked=done;box.style.cssText='width:16px;height:16px;flex-shrink:0';
+          box.disabled=locked||(isQC&&!qcOk);
+          box.onchange=function(){
+            if(box.checked)setStage(po,Math.min(idx+1,flow.length-1));
+            else setStage(po,idx);};
+          var lbl=el('span','',flow[idx]+
+            (current?' <span class="tag tg-pend" style="margin-left:6px">current</span>':'')+
+            (isQC?(qcOk?' <span class="tag tg-ok" style="margin-left:6px">QC approved</span>'
+                       :' <span class="tag tg-no" style="margin-left:6px">waiting on QC</span>'):'')+
+            (locked?' <span style="font-size:11px;color:var(--muted)">&#128274; needs QC first</span>':''));
+          row.appendChild(box);row.appendChild(lbl);
+          list.appendChild(row);
+        })(si);}
+      chk.appendChild(list);
+      if(!qcOk)chk.appendChild(el('div','','<div style="margin-top:8px;font-size:11px;color:var(--acc);line-height:1.5">&#9888; Stages after '+flow[QC_STAGE_IDX]+' unlock once QC records an approval. QC can do that from the QC / Content page.</div>'));
+      card.appendChild(chk);
+
+      /* --- remarks: the shared thread --- */
+      card.appendChild(remarksPanel(po,'ops'));
+
+      c.appendChild(card);
     })(active[ai]);}}
+
+/* ===== REMARKS =====
+   One thread per PO, shown identically in every view. Entries written elsewhere
+   in the app - Item Creation comments, QC comments, a Planning rejection reason -
+   are folded into the same timeline read-only, so a reviewer never has to know
+   which screen a note was typed on to find it. */
+function allRemarks(po){
+  var out=[],i;
+  var rem=po.remarks||[];
+  for(i=0;i<rem.length;i++)
+    out.push({ts:rem[i].ts,role:rem[i].role,text:rem[i].text,stage:rem[i].stage,tag:'Remark'});
+  var ic=(po.itemCreation&&po.itemCreation.comments)||[];
+  for(i=0;i<ic.length;i++)
+    out.push({ts:ic[i].ts,role:ic[i].role,text:ic[i].text+(ic[i].status?(' ['+ic[i].status+']'):''),
+      stage:'Item Creation',tag:'Item Creation'});
+  if(po.qc&&po.qc.comments)
+    out.push({ts:po.qc.lastUpdated||po.createdDate||'',role:po.qc.owner||'qc',
+      text:po.qc.comments,stage:'QC / Content',tag:'QC'});
+  if(po.qc&&po.qc.delayed==='Yes'&&po.qc.delayNote)
+    out.push({ts:po.qc.lastUpdated||'',role:'qc',
+      text:'DELAY \u2014 '+(po.qc.delayReason||'')+': '+po.qc.delayNote,stage:'QC / Content',tag:'Delay'});
+  if(po.rejectReason)
+    out.push({ts:'',role:'planning',text:'REJECTED \u2014 '+po.rejectReason,stage:'Approval',tag:'Planning'});
+  out.sort(function(a,b){return String(b.ts||'').localeCompare(String(a.ts||''));});
+  return out;}
+
+var REM_TAGCLS={'Remark':'mp','Item Creation':'tg-gr','QC':'tg-pend','Delay':'tg-no','Planning':'cn'};
+
+/* ctx makes the input id unique - the same PO can appear on two panels at once */
+function remarksPanel(po,ctx){
+  if(!po.remarks)po.remarks=[];
+  var list=allRemarks(po);
+  var box=el('div','');
+  box.style.cssText='margin-top:12px;padding:12px;background:var(--surf2);border:1px solid var(--bdr);border-radius:10px';
+  var h='<div style="font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:9px">'+
+    '&#128172; Remarks &amp; comments ('+list.length+') <span style="text-transform:none;font-weight:600">&mdash; shared across every view</span></div>';
+  if(list.length){
+    h+='<div style="max-height:170px;overflow-y:auto;margin-bottom:10px">';
+    for(var i=0;i<list.length;i++){
+      var r=list[i];
+      var when=r.ts?String(r.ts).slice(0,16).replace('T',' '):'';
+      h+='<div style="border-bottom:1px solid var(--bdr);padding:7px 0;font-size:12px">'+
+        '<span class="tag '+(REM_TAGCLS[r.tag]||'tg-gr')+'" style="font-size:10px">'+r.tag+'</span> '+
+        '<b style="text-transform:capitalize;margin-left:4px">'+(r.role||'')+'</b>'+
+        (r.stage?'<span class="pill" style="margin-left:6px">'+r.stage+'</span>':'')+
+        '<span style="color:var(--muted);font-size:11px;margin-left:6px">'+when+'</span>'+
+        '<div style="margin-top:3px;line-height:1.5">'+String(r.text||'').replace(/[<>]/g,'')+'</div></div>';}
+    h+='</div>';
+  }else h+='<div style="color:var(--muted);font-size:12px;margin-bottom:10px">No remarks yet on this PO.</div>';
+  var uid2=ctx+'_'+po.id;
+  h+='<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">'+
+    '<div class="f" style="flex:1;min-width:200px"><label>Add a remark (visible to every role)</label>'+
+    '<input id="rem_'+uid2+'" placeholder="Anything the next person needs to know..."></div>'+
+    '<button class="btn bp bs" id="remb_'+uid2+'">Add</button></div>';
+  box.innerHTML=h;
+  setTimeout(function(){
+    var b=$('#remb_'+uid2);
+    if(b)b.onclick=function(){addRemark(po.id,uid2);};
+    var inp=$('#rem_'+uid2);
+    if(inp)inp.onkeydown=function(e){if(e.key==='Enter')addRemark(po.id,uid2);};},0);
+  return box;}
+
+function addRemark(poId,ctx){
+  var po=null;
+  for(var i=0;i<DB.pos.length;i++)if(DB.pos[i].id===poId){po=DB.pos[i];break;}
+  if(!po){toast('PO not found',true);return;}
+  var inp=$('#rem_'+(ctx||poId));
+  if(!inp)inp=$('#rem_'+poId);
+  var txt=(inp?inp.value||'':'').trim();
+  if(!txt){toast('Type a remark first',true);return;}
+  if(!po.remarks)po.remarks=[];
+  po.remarks.push({ts:new Date().toISOString(),role:ST.role,text:txt,stage:po.stage});
+  sv();logA('Remark added',po.type,po.poNumber+': '+txt);
+  notifyEvent('remark','Remark on '+po.poNumber,
+    ST.role.toUpperCase()+' added a remark at stage "'+po.stage+'":\n\n'+txt+'\n\n'+poLine(po),po);
+  renderPage();toast('Remark added');}
 
 function addICComment(poId){
   var po=null;for(var i=0;i<DB.pos.length;i++){if(DB.pos[i].id===poId){po=DB.pos[i];break;}}
@@ -2593,6 +3008,7 @@ function addICComment(poId){
   po.itemCreation.status=st;sv();logA('IC comment','Operations',po.poNumber+': '+txt);renderPage();toast('Comment added');}
 
 /* ===== QC ===== */
+var QCTAB='queue';
 function pgQC(c){
   c.appendChild(el('div','ph','<h1>QC / Content</h1><p>QC validation before Item Creation. Delay info visible to all roles.</p>'));
   var all=[],queue=[];
@@ -2610,8 +3026,17 @@ function pgQC(c){
     else if(p2.stage==='Completed')completedC++;
     else notDoneC++;}
   function pct(n){return total?Math.round(n/total*100):0;}
+  var qcTabs=el('div','dtabs');qcTabs.style.marginBottom='14px';
+  qcTabs.innerHTML='<button class="dtab'+(QCTAB==='queue'?' on':'')+'" data-t="queue">QC queue</button>'+
+    '<button class="dtab'+(QCTAB==='all'?' on':'')+'" data-t="all">All POs &amp; remarks ('+all.length+')</button>';
+  c.appendChild(qcTabs);
+  var qt=qcTabs.querySelectorAll('.dtab');
+  for(var qi2=0;qi2<qt.length;qi2++){(function(btn){
+    btn.onclick=function(){QCTAB=btn.getAttribute('data-t');renderPage();};})(qt[qi2]);}
+  if(QCTAB==='queue')
   c.appendChild(el('div','sec','Breakdown of all '+total+' PO'+(total!==1?'s':'')+' &mdash; every PO counted once'));
   var kg=el('div','kgrid');
+  if(QCTAB!=='queue')kg.style.display='none';
   var kd=[[total,'Total PO','var(--pri2)','&#128203;',true],
     [underQCC,'Under QC','var(--yel)','&#9678;'],
     [delayC,'Delayed','var(--acc)','&#9201;'],
@@ -2623,7 +3048,7 @@ function pgQC(c){
     kg.appendChild(el('div','kpi','<div class="kt"><div><div class="kv">'+kd[ki][0]+(isTotalCard?'':'<span style="font-size:13px;font-weight:700;color:var(--muted)"> / '+total+'</span>')+'</div><div class="kl">'+kd[ki][1]+(isTotalCard?'':' &middot; '+pct(kd[ki][0])+'% of total')+'</div></div><div class="ki" style="background:'+kd[ki][2]+'1a;color:'+kd[ki][2]+'">'+kd[ki][3]+'</div></div>'));}
   c.appendChild(kg);
   /* Stacked breakdown bar — same mutually-exclusive buckets, so segments add up to exactly 100% */
-  if(total){
+  if(total&&QCTAB==='queue'){
     var segs=[['Under QC',underQCC,'var(--yel)'],['Delayed',delayC,'var(--acc)'],['Cancelled',cancelledC,'var(--grey)'],['Rejected',rejectedC,'var(--red)'],['Completed',completedC,'var(--grn)'],['Not Done Yet',notDoneC,'var(--pri2)']];
     var barWrap=el('div','card');barWrap.style.marginTop='4px';
     var segsHtml='';for(var si=0;si<segs.length;si++){if(segs[si][1]<=0)continue;segsHtml+='<div style="width:'+pct(segs[si][1])+'%;background:'+segs[si][2]+';height:100%" title="'+segs[si][0]+': '+segs[si][1]+' ('+pct(segs[si][1])+'%)"></div>';}
@@ -2634,7 +3059,7 @@ function pgQC(c){
     c.appendChild(barWrap);}
   /* Delayed section */
   var delayed=[];for(var di2=0;di2<all.length;di2++){if(all[di2].qc&&all[di2].qc.delayed==='Yes')delayed.push(all[di2]);}
-  if(delayed.length){
+  if(delayed.length&&QCTAB==='queue'){
     c.appendChild(el('div','sec','&#9201; Delayed POs'));
     for(var di=0;di<delayed.length;di++){
       (function(po){
@@ -2652,9 +3077,32 @@ function pgQC(c){
             '<div><div style="color:var(--muted);font-size:10px;font-weight:700;text-transform:uppercase">Log Events</div><b>'+logC+'</b></div></div>'+
           (po.qc.delayImages&&po.qc.delayImages.length?'<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px">'+po.qc.delayImages.map(function(src){return '<img src="'+src+'" style="width:56px;height:56px;object-fit:cover;border-radius:6px;border:1px solid var(--bdr);cursor:pointer" onclick="window.open(this.src,\'_blank\')">';}).join('')+'</div>':'')+
           (po.qc.comments?'<div style="margin-top:8px;padding:8px;background:var(--surf2);border-radius:6px;font-size:12px"><b>Comment:</b> '+po.qc.comments+'</div>':'');
+        card.appendChild(remarksPanel(po,'qcdel'));
         if(ST.role==='qc'){var ab=el('button','btn bp bs','&#9998; Edit QC');ab.style.marginTop='10px';ab.onclick=function(){qcModal(po);};card.appendChild(ab);}
         c.appendChild(card);
       })(delayed[di]);}}
+  /* QC only ever listed POs sitting at the QC stage, so a remark written on a PO
+     before or after that window was invisible to QC. This section keeps every PO
+     reachable from this page. */
+  if(QCTAB==='all'){
+    c.appendChild(el('div','sec','All POs \u2014 remarks &amp; comments ('+all.length+')'));
+    if(!all.length)c.appendChild(el('div','tw','<div class="empty">No POs yet.</div>'));
+    for(var ai2=0;ai2<all.length;ai2++){
+      (function(po){
+        var card=el('div','card');card.style.marginBottom='12px';
+        var ac3=po.approval==='Approved'?'tg-ok':po.approval==='Rejected'?'tg-no':'tg-pend';
+        card.innerHTML='<div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:center">'+
+          '<div><b>'+po.poNumber+'</b> <span class="tag '+(po.type==='Marketplace'?'mp':'cn')+'">'+po.type+'</span>'+
+          '<span style="color:var(--muted);font-size:12px"> &middot; '+po.supplier+' &middot; '+po.brand+' &middot; stage: '+po.stage+'</span></div>'+
+          '<div style="display:flex;gap:6px;align-items:center"><span class="tag '+ac3+'">'+po.approval+'</span>'+
+          (allRemarks(po).length?'<span class="tag mp">&#128172; '+allRemarks(po).length+'</span>':'')+'</div></div>';
+        card.appendChild(remarksPanel(po,'qcall'));
+        if(ST.role==='qc'){
+          var eb=el('button','btn bg bs','&#9998; Open QC Form');eb.style.marginTop='10px';
+          eb.onclick=function(){qcModal(po);};card.appendChild(eb);}
+        c.appendChild(card);})(all[ai2]);}
+    return;}
+
   /* Queue */
   c.appendChild(el('div','sec','QC / Content Queue ('+queue.length+')'));
   if(!queue.length){c.appendChild(el('div','tw','<div class="empty">No POs at QC / Content stage.<br><span style="font-size:12px;color:var(--muted)">POs appear here after Planning approves and stage advances to QC / Content.</span></div>'));return;}
@@ -2677,6 +3125,7 @@ function pgQC(c){
       var sfH='';for(var fi=0;fi<sf.length;fi++)sfH+='<div><div style="color:var(--muted);font-size:10px;font-weight:700;text-transform:uppercase;margin-bottom:2px">'+sf[fi][0]+'</div><b>'+sf[fi][1]+'</b></div>';
       if(po.qc.comments)sfH+='<div style="grid-column:1/-1"><div style="color:var(--muted);font-size:10px;font-weight:700;text-transform:uppercase;margin-bottom:2px">Comments</div><span>'+po.qc.comments+'</span></div>';
       sg.innerHTML=sfH;card.appendChild(sg);
+      card.appendChild(remarksPanel(po,'qc'));
       var act=el('div','');act.style.cssText='display:flex;gap:8px;align-items:center';
       if(ST.role==='qc'){var b=el('button','btn bp bs','&#9998; Open QC Form');b.onclick=function(){qcModal(po);};act.appendChild(b);}
       else act.appendChild(el('span','tag tg-gr','View only &mdash; switch to QC role to edit'));
@@ -2756,71 +3205,625 @@ function qcModal(po){
     po.qc.owner=nO;po.qc.status=nS;po.qc.approval=nA;po.qc.comments=nC;po.qc.dropReason=nD;po.qc.dropOther=nDO;
     po.qc.delayed=nDel;po.qc.delayReason=nDR;po.qc.delayOther=nDRO;po.qc.delayNote=nDN;po.qc.delayImages=(nDel==='Yes'?tmpImgs.slice():[]);po.qc.lastUpdated=ts;
     if(po.qc.approval==='Approved'&&po.stageIdx===QC_STAGE_IDX)advStage(po);
-    sv();logA('QC saved','QC',po.poNumber+(nDel==='Yes'?' | DELAYED: '+nDR:''));closeM();renderPage();toast('QC saved');};}
+    sv();logA('QC saved','QC',po.poNumber+(nDel==='Yes'?' | DELAYED: '+nDR:''));
+    notifyEvent('qc','QC '+(nA||'updated')+' \u00b7 '+po.poNumber,
+      'QC has been updated on '+po.poNumber+'.\n\nStatus: '+(nS||'\u2014')+'\nApproval: '+(nA||'\u2014')+
+      '\nOwner: '+(nO||'\u2014')+(nDel==='Yes'?('\nDELAYED: '+nDR+(nDN?(' \u2014 '+nDN):'')):'')+
+      (nC?('\nComments: '+nC):'')+'\n\n'+poLine(po),po);
+    if(gtOn())gtPushPO(po,true);
+    closeM();renderPage();toast('QC saved');};}
 
-/* ===== DETAILED TRACKER ===== */
-var TCOLS=[['territory','Territory'],['department','Dept'],['brand','Brand'],['supplier','Supplier'],['entity','PO Entity'],
-  ['type','MP/CN'],['buyer','Buyer'],['createdDate','Created'],['currency','Currency'],['value','PO Value'],['margin','Margin %'],
-  ['totalOptions','Options'],['totalQty','Total Qty'],['app','APP'],['stage','Stage'],['approval','Approval'],['priority','Priority'],
-  ['poNumber','Tracker No.'],['_goLive','Go Live'],['_asnNum','ASN #'],['_grnQty','GRN Qty'],
-  ['_grnDate','GRN Date'],['_opsComments','Ops Comments'],['_piSub','PI Submission'],['_imgSub','Image Submission'],
-  ['_stockReady','Stock Ready'],['_delivType','Delivery Type'],['_pickup','Pickup Status'],['_specialCond','Special Condition'],
-  ['_cdcUAE','CDC UAE'],['_cdcKSA','CDC KSA'],['_cdcKWT','CDC KWT'],['_cdcQAT','CDC QAT']];
-var EDIT_EXTRA=[['_asnNum','ASN Number'],['_grnQty','GRN Qty'],['_grnDate','GRN Date'],['_opsComments','Ops Comments'],
-  ['_piSub','PI Submission'],['_imgSub','Image Submission'],['_stockReady','Stock Ready Date'],['_delivType','Delivery Type'],
-  ['_pickup','Pickup Status'],['_specialCond','Special Condition'],['_cdcUAE','CDC UAE'],['_cdcKSA','CDC KSA'],['_cdcKWT','CDC KWT'],['_cdcQAT','CDC QAT']];
-var dtSrch='';
+/* ===== GOOGLE TRACKER INTEGRATION =====
+   Two-way bridge to the "GO LIVE 2" sheet via an Apps Script Web App.
+   Reading:  polled, so a change made in Google shows up here on its own.
+   Writing:  a PO is appended at the next free row and the row number comes back
+             and is stored on the PO, so the app and the sheet agree on where it
+             lives. Append is idempotent on PO number, so a retry or a double
+             click updates the existing row instead of duplicating it.
+
+   Column layout of the tracker (A..BI, 61 columns) is declared once below.
+   If a column is inserted in Google, change GT_COLS and nothing else. */
+var GT_CFGKEY='po_gtracker_cfg';
+var GT={url:'',secret:''};
+var GTSTATE={loaded:false,busy:false,err:'',headers:[],rows:[],firstRow:0,
+  lastDataRow:0,nextRow:0,updated:'',poll:null,byPo:{}};
+
+/* 0-based index -> tracker column. Keep in the sheet's own order. */
+var GT_COLS=['Territory','Department','Brand','Supplier Name','PO Creation Entitiy',
+  'Outright/ Consigment','Buyer Name','Submission for PO creation Date','PI Submission',
+  'Image Submission','Order Type','Stock ready for pickup Date','Delivery type',
+  'New Options','New qty','Replenishment Options','Repl qty','Total Option','Total Qty',
+  'PO Val','PO currency','PO Special condition','PO Creation Date','Po Number',
+  'Sort / NON Sort / Import','PO Qty','PO Net Cost','PO Currency','PO creation Type',
+  'ODN Submission','ODN Submission Date','Cam Pushed Date','Dropped Options',
+  'Image Received Options','Not Received Options','GO live','Ops Comments',
+  'Expected Pick up date','ASN Request Date','ASN Number','Checklist Dump Shared',
+  'pickup Current Status','Actual Pick up Date','GRN Qty','GRN Date','GRN Qty KSA',
+  'GRN Date KSA','GRN Qty UAE','GRN Date UAE','GRN Qty KWT','GRN Date KWT',
+  'GRN Qty QAT','GRN Date QAT','PO Not Created Pendency','Pending Deliveries',
+  'Pick Up Service Level','CDC Transfer Timeline KSA','CDC Transfer Timeline UAE',
+  'CDC Transfer Timeline KWT','CDC Transfer Timeline QTR','Sock / Transfer Order for MDC'];
+
+/* The tracker records Outright vs Consignment. Marketplace is a different
+   commercial model, so it is passed through rather than guessed at - confirm
+   with the team which value they want and change it here if needed. */
+var GT_MODEL={Consignment:'Consignment',Marketplace:'Marketplace'};
+
+/* OWNERSHIP BOUNDARY
+   A..U (the first 21 columns, up to and including "PO currency") is raised by
+   this app and written to the sheet the moment a PO is created - before Planning
+   approval, so the row exists for the team to work on.
+   V..BI is filled by the team inside Google. The app never writes there and
+   reads those values back for display, so the sheet stays the single source of
+   truth for operational fields. */
+var GT_WRITE_COLS=21;
+
+function gtLoadCfg(){
+  try{var raw=lsGet(GT_CFGKEY);if(raw){var c=JSON.parse(raw);if(c&&c.url){GT=c;return;}}}catch(e){}
+  if(DB&&DB.prefs&&DB.prefs.gtracker&&DB.prefs.gtracker.url)GT=DB.prefs.gtracker;}
+function gtSaveCfg(c){
+  GT=c;lsSet(GT_CFGKEY,JSON.stringify(c));
+  DB.prefs.gtracker=c;sv();}
+function gtOn(){return !!(GT&&GT.url);}
+
+/* --- option counts split by New / Replenishment, from the stored sheet --- */
+function gtOptionSplit(po){
+  var res={newOpt:0,newQty:0,replOpt:0,replQty:0};
+  if(!po.sheet||!Array.isArray(po.sheet.kept))return res;
+  var seenNew={},seenRepl={};
+  for(var i=0;i<po.sheet.kept.length;i++){
+    var r=po.sheet.kept[i];
+    var q=Number(r.q)||0;
+    if(r.t==='Replenishment'){
+      if(!seenRepl[r.c]){seenRepl[r.c]=1;res.replOpt++;}
+      res.replQty+=q;
+    }else{
+      if(!seenNew[r.c]){seenNew[r.c]=1;res.newOpt++;}
+      res.newQty+=q;}}
+  return res;}
+
+function gtOrderType(po){
+  var sp=gtOptionSplit(po);
+  if(sp.newOpt&&sp.replOpt)return 'Reorder+ New';
+  if(sp.replOpt)return 'Reorder';
+  if(sp.newOpt)return 'New';
+  return '';}
+
+/* --- read --- */
+function gtFetchMeta(cfg){
+  var u=(cfg||GT).url+'?action=meta'+((cfg||GT).secret?'&secret='+encodeURIComponent((cfg||GT).secret):'');
+  return fetch(u).then(function(r){return r.json();}).then(function(j){
+    if(!j||!j.ok)throw new Error((j&&j.error)||'Bridge returned no data');
+    return j;});}
+
+function gtPull(opts){
+  opts=opts||{};
+  if(!gtOn())return Promise.resolve(false);
+  GTSTATE.busy=true;gtRefreshUI();
+  var u=GT.url+'?action=rows&limit='+(opts.limit||250)+(GT.secret?'&secret='+encodeURIComponent(GT.secret):'');
+  return fetch(u).then(function(r){return r.json();}).then(function(j){
+    GTSTATE.busy=false;
+    if(!j||!j.ok)throw new Error((j&&j.error)||'Bridge error');
+    var changed=(GTSTATE.lastDataRow!==j.lastDataRow);
+    GTSTATE.headers=j.headers||[];
+    GTSTATE.rows=j.rows||[];
+    GTSTATE.firstRow=j.firstRowNumber||0;
+    GTSTATE.lastDataRow=j.lastDataRow||0;
+    GTSTATE.nextRow=j.nextRow||0;
+    GTSTATE.updated=j.updated||'';
+    /* index by PO number so the tracker can show what the team typed in V..BI */
+    var poIx=GT_COLS.indexOf('Po Number');
+    GTSTATE.byPo={};
+    for(var bi=0;bi<GTSTATE.rows.length;bi++){
+      var key=String(GTSTATE.rows[bi][poIx]||'').trim();
+      if(key)GTSTATE.byPo[key.toUpperCase()]={row:GTSTATE.firstRow+bi,cells:GTSTATE.rows[bi]};}
+    GTSTATE.loaded=true;GTSTATE.err='';
+    gtRefreshUI();
+    return {changed:changed};
+  }).catch(function(err){
+    GTSTATE.busy=false;
+    GTSTATE.err=(err&&err.message)||'Could not reach the Google bridge';
+    gtRefreshUI();return false;});}
+
+function gtStartPolling(){
+  if(GTSTATE.poll)clearInterval(GTSTATE.poll);
+  if(!gtOn())return;
+  GTSTATE.poll=setInterval(function(){
+    if(document.hidden||GTSTATE.busy)return;
+    gtPull({}).then(function(r){
+      if(r&&r.changed&&ST.page==='tracker'){renderPage();toast('Google tracker updated');}});},30000);}
+
+/* --- write --- */
+function gtPushPO(po,silent){
+  if(!gtOn()){if(!silent)toast('Connect the Google tracker first (Masters & Settings)',true);return Promise.resolve(false);}
+  /* Column X holds the team's own PO number, so it can no longer be used to find
+     our row. The row number returned on first write is the durable link - use it
+     for every later sync, and only fall back to append if we have not got one. */
+  var body=po.trackerRow
+    ? {action:'update',row:po.trackerRow,values:gtWriteRowForPO(po),writeCols:GT_WRITE_COLS}
+    : {action:'append',po:po.poNumber,values:gtWriteRowForPO(po),writeCols:GT_WRITE_COLS};
+  if(GT.secret)body.secret=GT.secret;
+  if(!silent)toast('Writing to Google tracker\u2026');
+  /* text/plain on purpose: application/json would trigger a CORS preflight that
+     Apps Script cannot answer, and the request would fail before arriving */
+  return fetch(GT.url,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},
+    body:JSON.stringify(body)}).then(function(r){return r.json();}).then(function(j){
+    if(!j||!j.ok)throw new Error((j&&j.error)||'Bridge refused the write');
+    /* A reply with ok:true but no row number means the deployed script did not
+       actually write - almost always the minimal TEST script still being live,
+       whose doPost returns ok without touching the sheet. Treat it as a failure
+       rather than reporting a success that never happened. */
+    if(!j.row){
+      throw new Error('The bridge replied but wrote nothing (no row number returned). '+
+        'The deployed script is probably still the minimal test version \u2014 paste the full '+
+        'google-apps-script.gs into Code.gs, save, then Deploy \u2192 Manage deployments \u2192 New version.');}
+    po.trackerRow=j.row;po.trackerSyncedAt=new Date().toISOString();
+    sv();logA('Synced to Google tracker','Tracker',po.poNumber+' -> row '+j.row);
+    if(!silent)toast(j.action==='updated-existing'?
+      ('Updated existing row '+j.row):('Added at row '+j.row));
+    gtPull({});
+    return j;
+  }).catch(function(err){
+    /* .then(onOk,onErr) would NOT catch a throw inside onOk - the rejection would
+       go unhandled and the user would see nothing at all. .catch covers both the
+       network failure and our own validation throw. */
+    var msg=(err&&err.message)||'unknown error';
+    GTSTATE.err=msg;gtRefreshUI();
+    if(!silent)toast('Sheet write failed: '+msg,true);
+    else logA('Sheet write failed','Tracker',(po.poNumber||'')+': '+msg);
+    return false;});}
+
+/* --- settings card --- */
+function gtSettingsCard(){
+  var card=el('div','card');card.style.marginTop='18px';card.id='gtCard';
+  gtBuildSettings(card);
+  return card;}
+function gtBuildSettings(card){
+  var st=gtOn()?(GTSTATE.err?'warn':'ok'):'warn';
+  var msg=gtOn()
+    ?(GTSTATE.err?('\u26a0 '+GTSTATE.err)
+      :(GTSTATE.loaded?('\u2713 Connected \u2014 '+GTSTATE.lastDataRow+' rows, next PO goes to row '+GTSTATE.nextRow)
+        :'\u2713 Saved \u2014 not read yet'))
+    :'\u25cf Not connected';
+  card.innerHTML='<b style="font-weight:800">&#128202; Google Tracker (GO LIVE 2)</b>'+
+    '<p style="color:var(--muted);font-size:12px;margin:6px 0 12px;line-height:1.6">'+
+      'Links this app to the shared Google tracker. A new PO is written to the next free row <b>as soon as it is raised</b> '+
+      '(before Planning approval), filling <b>columns A\u2013U</b> only. The team fills <b>V\u2013BI</b> in Google, and those values '+
+      'are read back and shown here \u2014 the app never writes past column U, so a re-sync cannot overwrite their work. '+
+      'Changes in Google appear here within 30 seconds.'+
+      '<br>Requires the Apps Script bridge (see <b>google-apps-script.gs</b>). '+
+      '<b style="color:var(--acc)">Do not commit this URL to a public repo</b> \u2014 paste it here instead.</p>'+
+    '<div class="dstat '+st+'" style="margin-bottom:12px">'+msg+'</div>'+
+    '<div class="fg">'+
+      '<div class="f full"><label>Apps Script Web App URL</label><input id="gt_url" value="'+(GT.url||'')+'" placeholder="https://script.google.com/macros/s/AKfycb.../exec"></div>'+
+      '<div class="f full"><label>Shared secret (optional)</label><input id="gt_secret" value="'+(GT.secret||'')+'" placeholder="Leave blank unless you set SHARED_SECRET in the script"></div>'+
+    '</div>'+
+    '<div id="gt_msg" style="font-size:12px;font-weight:700;margin-top:10px;min-height:18px"></div>'+
+    '<div class="irow" style="margin-top:8px">'+
+      '<button class="btn bp bs" type="button" id="gt_save">Test &amp; save</button>'+
+      (gtOn()?'<button class="btn bg bs" type="button" id="gt_pull">&#8635; Read tracker now</button>':'')+
+      (gtOn()?'<button class="btn bg bs" type="button" id="gt_wtest">&#9998; Test write</button>':'')+
+      (gtOn()?'<button class="btn bd bs" type="button" id="gt_off">Disconnect</button>':'')+
+    '</div>';
+  setTimeout(function(){
+    var sb=$('#gt_save');
+    if(sb)sb.onclick=function(){
+      var cfg={url:cleanUrlInput($('#gt_url').value),secret:cleanPlain($('#gt_secret').value)};
+      var m=$('#gt_msg');
+      if(!cfg.url){m.style.color='var(--red)';m.textContent='Paste the Web App URL first.';return;}
+      if(cfg.url.indexOf('script.google.com')<0){m.style.color='var(--acc)';m.textContent='That does not look like an Apps Script URL \u2014 it should contain script.google.com/macros/s/...';}
+      m.style.color='var(--muted)';m.textContent='Testing\u2026';
+      gtFetchMeta(cfg).then(function(j){
+        gtSaveCfg(cfg);
+        GTSTATE.lastDataRow=j.lastDataRow;GTSTATE.nextRow=j.nextRow;GTSTATE.loaded=true;GTSTATE.err='';
+        m.style.color='var(--grn)';
+        m.textContent='\u2713 Connected to tab "'+j.sheet+'" \u2014 '+j.columns+' columns, last row '+j.lastDataRow+', next PO row '+j.nextRow;
+        gtStartPolling();
+        setTimeout(function(){renderPage();},1200);
+      },function(err){
+        m.style.color='var(--red)';
+        var em=(err&&err.message)||'Could not reach it';
+        var hint=' \u2014 check the deployment is a Web app with access set to Anyone, and that you pasted the /exec URL.';
+        if(/not found\. Tabs in this file/i.test(em))
+          hint=' \u2014 set SHEET_NAME in the Apps Script to one of those names (or to an empty string to use the first tab), save, then redeploy as a New version.';
+        else if(/Failed to fetch/i.test(em))
+          hint=' \u2014 the browser could not reach it at all. Open the /exec URL in a tab: if that works too, something on this network is blocking the app\'s request.';
+        m.style.color='var(--red)';m.textContent='\u2717 '+em+hint;});};
+    var pb=$('#gt_pull');
+    if(pb)pb.onclick=function(){gtPull({}).then(function(){renderPage();toast('Tracker read');});};
+    var wt=$('#gt_wtest');
+    if(wt)wt.onclick=function(){
+      var m2=$('#gt_msg');
+      m2.style.color='var(--muted)';m2.textContent='Writing a test row\u2026';
+      var vals=[];for(var i=0;i<GT_COLS.length;i++)vals.push('');
+      var ix=GT_COLS.indexOf('Po Number');if(ix>=0)vals[ix]='TEST-DELETE-ME';
+      var ix2=GT_COLS.indexOf('Ops Comments');if(ix2>=0)vals[ix2]='Written by the PO Automation Engine connection test - safe to delete';
+      var body={action:'append',po:'TEST-DELETE-ME',values:vals};
+      if(GT.secret)body.secret=GT.secret;
+      fetch(GT.url,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(body)})
+        .then(function(r){return r.json();}).then(function(j){
+          if(!j||!j.ok){m2.style.color='var(--red)';m2.textContent='\u2717 '+((j&&j.error)||'Bridge refused the write');return;}
+          if(!j.row){
+            m2.style.color='var(--red)';
+            m2.textContent='\u2717 Replied ok but wrote nothing \u2014 the deployed script is still the minimal test version. Paste the FULL google-apps-script.gs, save, then Deploy \u2192 Manage deployments \u2192 New version.';return;}
+          m2.style.color='var(--grn)';
+          m2.textContent='\u2713 Wrote a test row at '+j.row+' (PO number TEST-DELETE-ME). Check the sheet, then delete that row.';
+          gtPull({});
+        }).catch(function(err){
+          m2.style.color='var(--red)';
+          m2.textContent='\u2717 '+((err&&err.message)||'Write failed')+' \u2014 if reading works but writing does not, redeploy as a NEW VERSION after pasting the full script.';});};
+    var ob=$('#gt_off');
+    if(ob)ob.onclick=function(){
+      if(!confirm('Disconnect the Google tracker? Nothing in the sheet is changed.'))return;
+      GT={url:'',secret:''};lsSet(GT_CFGKEY,'');DB.prefs.gtracker=null;sv();
+      if(GTSTATE.poll)clearInterval(GTSTATE.poll);
+      renderPage();toast('Disconnected');};
+  },0);}
+
+function gtRefreshUI(){
+  var b=$('#gtStatus');
+  if(b){
+    b.textContent=gtOn()
+      ?(GTSTATE.err?'\u26a0 Google tracker: '+GTSTATE.err
+        :GTSTATE.busy?'\u21bb Reading Google tracker\u2026'
+        :'\u2713 Google tracker \u2014 '+GTSTATE.lastDataRow+' rows, next row '+GTSTATE.nextRow)
+      :'\u25cf Google tracker not connected';
+    b.className='syncbadge '+(gtOn()?(GTSTATE.err?'warn':'ok'):'warn');}
+  var c=$('#gtCard');if(c)gtBuildSettings(c);}
+
+/* ===== DETAILED TRACKER =====
+   The column set IS the Google tracker's column set (GT_COLS, 61 columns A..BI)
+   so the app and the sheet are the same shape. One function decides every cell
+   value - the table, the edit form, the Excel export and the row written to
+   Google all read from it, so they cannot disagree.
+
+   Columns fall into two kinds:
+     AUTO   - derived from the PO by the engine and workflow. Read-only here,
+              because editing a copy of a derived number just creates a second
+              version of the truth.
+     MANUAL - operational fields nobody can derive (ASN numbers, GRN dates,
+              pickup status). Stored on po.gtx keyed by the sheet's own column
+              name, so inserting a column in Google does not shift the data. */
+
+var GT_AUTO={
+  'Territory':function(po){return po.territory||'';},
+  'Department':function(po){return po.department||'';},
+  'Brand':function(po){return po.brand||'';},
+  'Supplier Name':function(po){return po.supplier||'';},
+  'PO Creation Entitiy':function(po){return po.entity||'';},
+  'Outright/ Consigment':function(po){return GT_MODEL[po.type]||po.type||'';},
+  'Buyer Name':function(po){return po.buyer||'';},
+  'Submission for PO creation Date':function(po){return po.createdDate||'';},
+  'Order Type':function(po){return gtOrderType(po);},
+  'New Options':function(po){return gtOptionSplit(po).newOpt||0;},
+  'New qty':function(po){return gtOptionSplit(po).newQty||0;},
+  'Replenishment Options':function(po){return gtOptionSplit(po).replOpt||0;},
+  'Repl qty':function(po){return gtOptionSplit(po).replQty||0;},
+  'Total Option':function(po){return po.totalOptions||0;},
+  'Total Qty':function(po){return po.totalQty||0;},
+  'PO Val':function(po){return po.value||0;},
+  'PO currency':function(po){return po.currency||'';},
+  'PO Creation Date':function(po){return po.createdDate||'';},
+  'Po Number':function(po){return po.poNumber||'';},
+  'PO Qty':function(po){return po.totalQty||0;},
+  'PO Net Cost':function(po){return po.value||0;},
+  'PO Currency':function(po){return po.currency||'';},
+  'Dropped Options':function(po){return (po.sheet&&po.sheet.counts)?po.sheet.counts.dropped:'';},
+  'GO live':function(po){return (po.stage==='Go Live'||po.stage==='Completed')?'Live':'';}};
+
+/* older POs kept these under po.extra - read them so nothing is lost */
+var GT_LEGACY={'PI Submission':'_piSub','Image Submission':'_imgSub',
+  'Stock ready for pickup Date':'_stockReady','Delivery type':'_delivType',
+  'PO Special condition':'_specialCond','Sort / NON Sort / Import':'_delivType',
+  'Ops Comments':'_opsComments','ASN Number':'_asnNum',
+  'GRN Qty':'_grnQty','GRN Date':'_grnDate','pickup Current Status':'_pickup',
+  'GRN Qty KSA':'_cdcKSA','GRN Qty UAE':'_cdcUAE','GRN Qty KWT':'_cdcKWT','GRN Qty QAT':'_cdcQAT'};
+
+/* The PO number the team types into the sheet (column X) is the real ERP number.
+   Ours is a tracking code. Both matter, so both are shown - never conflated. */
+function gtSheetPoNumber(po){
+  var sr=gtSheetRow(po);
+  if(!sr)return '';
+  var ix=GT_COLS.indexOf('Po Number');
+  var v=(ix>=0)?sr.cells[ix]:'';
+  v=String(v==null?'':v).trim();
+  return (v&&v!==po.poNumber)?v:'';}
+
+function gtSheetRow(po){
+  if(!po||!po.poNumber)return null;
+  var hit=GTSTATE.byPo&&GTSTATE.byPo[String(po.poNumber).toUpperCase()];
+  return hit||null;}
+
+function gtCellValue(po,name){
+  var ix=GT_COLS.indexOf(name);
+  /* PRECEDENCE, and the order matters:
+     1. From column V onward the SHEET wins outright - including over anything the
+        engine could derive. Several derivable columns (PO Qty, PO Net Cost, GO
+        live, Dropped Options) live past U, and the team's typed value is the
+        real one once they have filled it. Checking AUTO first would show a stale
+        or blank engine value on top of their work.
+     2. Then the engine's derived value, which for a sheet-owned column acts as a
+        sensible default until the team fills it.
+     3. Then anything entered here in the app, then the legacy extra fields. */
+  if(ix>=GT_WRITE_COLS){
+    var sr=gtSheetRow(po);
+    if(sr&&sr.cells[ix]!=null&&String(sr.cells[ix]).trim()!=='')
+      return {v:sr.cells[ix],auto:true,src:'sheet'};}
+  if(GT_AUTO[name])return {v:GT_AUTO[name](po),auto:true,src:'engine'};
+  var v=(po.gtx&&po.gtx[name]!=null)?po.gtx[name]:null;
+  if((v===null||v==='')&&GT_LEGACY[name]&&po.extra)v=po.extra[GT_LEGACY[name]];
+  return {v:(v==null?'':v),auto:false,src:'app'};}
+
+function gtSetCell(po,name,val){
+  if(GT_AUTO[name])return false;      /* never overwrite a derived value */
+  if(!po.gtx)po.gtx={};
+  po.gtx[name]=val;
+  return true;}
+
+/* the row written to Google is exactly what the tracker shows */
+/* full 61-wide row, used for display and export */
+function gtRowForPO(po){
+  var v=[];
+  for(var i=0;i<GT_COLS.length;i++)v.push(gtCellValue(po,GT_COLS[i]).v);
+  return v;}
+
+/* only the block this app owns, A..U - what actually gets written to Google */
+function gtWriteRowForPO(po){
+  var v=[];
+  for(var i=0;i<GT_WRITE_COLS;i++)v.push(gtCellValue(po,GT_COLS[i]).v);
+  return v;}
+
+var dtSrch='',dtTab='app';
 function pgTracker(c){
   var type=ST.params.type,filter=ST.params.filter;
-  c.appendChild(el('div','ph','<h1>Detailed PO Tracker</h1><p>Auto-synced from Engine &amp; workflows.'+(type?' Filtered: <b>'+type+' &middot; '+filter+'</b>':'')+'</p>'));
+  c.appendChild(el('div','ph','<h1>Detailed PO Tracker</h1><p>Same '+GT_COLS.length+' columns as the GO LIVE 2 sheet'+
+    (gtOn()?', two-way synced':'')+'.'+(type?' Filtered: <b>'+type+' &middot; '+filter+'</b>':'')+'</p>'));
+
+  /* --- source tabs + live status --- */
+  var bar=el('div','');bar.style.cssText='display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px';
+  var tabs=el('div','dtabs');
+  tabs.innerHTML='<button class="dtab'+(dtTab==='app'?' on':'')+'" data-t="app">App POs ('+DB.pos.length+')</button>'+
+    '<button class="dtab'+(dtTab==='google'?' on':'')+'" data-t="google">Google sheet'+(GTSTATE.loaded?' ('+GTSTATE.lastDataRow+' rows)':'')+'</button>';
+  bar.appendChild(tabs);
+  var st=el('span','syncbadge '+(gtOn()?(GTSTATE.err?'warn':'ok'):'warn'));st.id='gtStatus';
+  st.textContent=gtOn()?(GTSTATE.err?'\u26a0 '+GTSTATE.err:GTSTATE.loaded?('\u2713 Sheet \u2014 '+GTSTATE.lastDataRow+' rows, next row '+GTSTATE.nextRow):'\u21bb Reading\u2026'):'\u25cf Sheet not connected';
+  bar.appendChild(st);
+  if(gtOn()){
+    var rb=el('button','btn bg bs','&#8635; Refresh');
+    rb.onclick=function(){gtPull({}).then(function(){renderPage();});};
+    bar.appendChild(rb);
+    var pb=el('button','btn bg bs','&#8593; Sync all approved');
+    pb.onclick=function(){gtPushAll();};
+    bar.appendChild(pb);
+  }else{
+    var cb=el('button','btn bg bs','&#128279; Connect sheet');
+    cb.onclick=function(){go('masters');};
+    bar.appendChild(cb);}
+  c.appendChild(bar);
+  var tb=tabs.querySelectorAll('.dtab');
+  for(var t=0;t<tb.length;t++){(function(btn){btn.onclick=function(){dtTab=btn.getAttribute('data-t');renderPage();};})(tb[t]);}
+
+  if(dtTab==='google'){pgGoogleTracker(c);return;}
+
+  /* --- filter the POs --- */
   var pos=[];
   for(var i=0;i<DB.pos.length;i++){var p=DB.pos[i];
     if(type&&p.type!==type)continue;
     if(filter&&filter!=='All'){if(filter==='In Progress'){if(p.stage==='Completed'||p.stage==='Cancelled')continue;}else{if(p.stage!==filter)continue;}}
-    if(dtSrch&&(p.poNumber+p.supplier+p.brand+p.trackingId).toLowerCase().indexOf(dtSrch.toLowerCase())<0)continue;
+    if(dtSrch){
+      var hay=(p.poNumber+' '+p.supplier+' '+p.brand+' '+p.trackingId+' '+(p.buyer||'')+' '+(p.territory||'')).toLowerCase();
+      if(hay.indexOf(dtSrch.toLowerCase())<0)continue;}
     pos.push(p);}
+
   var tw=el('div','tw');var tt=el('div','tt');
-  tt.innerHTML='<div class="srch">&#128269;<input id="dtS" placeholder="Search PO..." value="'+dtSrch+'"></div>';
+  tt.innerHTML='<div class="srch">&#128269;<input id="dtS" placeholder="Search PO, supplier, brand, buyer..." value="'+dtSrch+'"></div>'+
+    '<span class="pill">'+pos.length+' of '+DB.pos.length+' POs &middot; '+GT_COLS.length+' columns</span>';
   var ex=el('button','btn bg','&#11015; Export Excel');ex.onclick=function(){exportTracker(pos);};tt.appendChild(ex);
   if(type){var cl=el('button','btn bg bs','&#10005; Clear filter');cl.onclick=function(){go('tracker',{});};tt.appendChild(cl);}
   tw.appendChild(tt);
-  var sc=el('div','ts');
-  if(!pos.length)sc.appendChild(el('div','empty','<div class="big">&#9637;</div>No POs match.'));
-  else{var t=el('table');t.innerHTML='<thead><tr>'+TCOLS.map(function(x){return '<th>'+x[1]+'</th>';}).join('')+'<th>Actions</th></tr></thead>';
-    var tb=el('tbody');
-    for(var pi=0;pi<pos.length;pi++){
-      (function(po){var d=po.extra||{};
-        var vals={territory:po.territory,department:po.department,brand:po.brand,supplier:po.supplier,entity:po.entity,type:po.type,buyer:po.buyer,createdDate:po.createdDate,currency:po.currency,value:po.value,margin:po.margin,totalOptions:po.totalOptions,totalQty:po.totalQty,app:po.app,stage:po.stage,approval:po.approval,priority:po.priority,trackingId:po.trackingId,poNumber:po.poNumber,
-          _goLive:po.stage==='Go Live'||po.stage==='Completed'?'Yes':'',_asnNum:d._asnNum||'',_grnQty:d._grnQty||'',_grnDate:d._grnDate||'',_opsComments:d._opsComments||'',_piSub:d._piSub||'',_imgSub:d._imgSub||'',_stockReady:d._stockReady||'',_delivType:d._delivType||'',_pickup:d._pickup||'',_specialCond:d._specialCond||'',_cdcUAE:d._cdcUAE||'',_cdcKSA:d._cdcKSA||'',_cdcKWT:d._cdcKWT||'',_cdcQAT:d._cdcQAT||''};
-        var tr=el('tr');var cells='';
-        for(var ci=0;ci<TCOLS.length;ci++){var col=TCOLS[ci][0];var v=vals[col];
-          if(col==='stage'){var sc2=po.stage==='Completed'?'tg-ok':po.stage==='Cancelled'?'tg-no':'tg-pend';cells+='<td><span class="tag '+sc2+'">'+po.stage+'</span></td>';}
-          else if(col==='approval'){var ac=po.approval==='Approved'?'tg-ok':po.approval==='Rejected'?'tg-no':'tg-pend';cells+='<td><span class="tag '+ac+'">'+po.approval+'</span></td>';}
-          else cells+='<td>'+(v!=null&&v!==''?v:'<span style="color:var(--grey)">&mdash;</span>')+'</td>';}
-        tr.innerHTML=cells;
-        var td=el('td');var ra=el('div','ra');
-        var e=el('button','ia','&#9998;');e.onclick=function(){trackerEdit(po);};
-        var x=el('button','ia d','&#128465;');x.onclick=function(){if(!confirm('Delete PO "'+po.poNumber+'"?'))return;DB.pos=DB.pos.filter(function(p){return p.id!==po.id;});sv();logA('Deleted PO','Tracker',po.poNumber);renderPage();toast('PO deleted');};
-        ra.appendChild(e);ra.appendChild(x);td.appendChild(ra);tr.appendChild(td);tb.appendChild(tr);
-      })(pos[pi]);}
-    t.appendChild(tb);sc.appendChild(t);}
-  tw.appendChild(sc);c.appendChild(tw);
-  var s=$('#dtS');if(s)s.oninput=function(e){dtSrch=e.target.value;renderPage();};}
 
+  var sc=el('div','ts sheetview');
+  if(!pos.length)sc.appendChild(el('div','empty','<div class="big">&#9637;</div>No POs match.'));
+  else{
+    var tbl=el('table');
+    var head='<thead><tr><th class="rowno">Row</th><th class="stickcol">Actions</th>'+
+      '<th style="background:rgba(232,112,58,.14)">Tracker No. (app)</th>'+
+      '<th style="background:rgba(46,158,107,.14)">PO No. (sheet)</th>'+
+      '<th>Stage</th><th>Approval</th><th>Remarks</th>';
+    for(var ci=0;ci<GT_COLS.length;ci++){
+      var isAuto=!!GT_AUTO[GT_COLS[ci]];
+      var isSheetOwned=(ci>=GT_WRITE_COLS);
+      var bg=isSheetOwned?'rgba(46,158,107,.14)':(isAuto?'rgba(68,114,196,.14)':'');
+      var tip=isSheetOwned?'Filled in the Google sheet by the team':(isAuto?'Derived by the engine':'Editable here');
+      head+='<th'+(bg?' style="background:'+bg+'"':'')+' title="'+tip+'">'+
+        '<span style="color:var(--muted);font-weight:800">'+gtColLetter(ci)+'</span> '+GT_COLS[ci]+'</th>';}
+    head+='</tr></thead>';
+    tbl.innerHTML=head;
+    var body=el('tbody');
+    for(var pi=0;pi<pos.length;pi++){
+      (function(po){
+        var tr=el('tr');
+        var cells='<td class="rowno">'+(po.trackerRow||'\u2014')+'</td>';
+        cells+='<td class="stickcol"></td>';
+        var sheetPo=gtSheetPoNumber(po);
+        cells+='<td style="font-weight:700;color:var(--pri2);background:rgba(232,112,58,.05)">'+po.poNumber+'</td>'+
+          '<td style="background:rgba(46,158,107,.07);font-weight:700">'+(sheetPo||'<span style="color:var(--grey)">&mdash;</span>')+'</td>';
+        var sc2=po.stage==='Completed'?'tg-ok':po.stage==='Cancelled'?'tg-no':'tg-pend';
+        var ac=po.approval==='Approved'?'tg-ok':po.approval==='Rejected'?'tg-no':'tg-pend';
+        cells+='<td><span class="tag '+sc2+'">'+po.stage+'</span></td><td><span class="tag '+ac+'">'+po.approval+'</span></td>';
+        var rl=allRemarks(po);
+        var last=rl.length?String(rl[0].text||'').replace(/"/g,'&quot;').slice(0,90):'';
+        cells+='<td'+(rl.length?' title="'+rl[0].role+': '+last+'"':'')+'>'+
+          (rl.length?('<span class="tag mp">&#128172; '+rl.length+'</span> <span style="color:var(--muted);font-size:11px">'+last.slice(0,34)+(last.length>34?'\u2026':'')+'</span>')
+                    :'<span style="color:var(--grey)">&mdash;</span>')+'</td>';
+        for(var k=0;k<GT_COLS.length;k++){
+          var cv=gtCellValue(po,GT_COLS[k]);
+          var show=(cv.v===''||cv.v==null)?'<span style="color:var(--grey)">&mdash;</span>':String(cv.v);
+          var bgc=cv.src==='sheet'?'rgba(46,158,107,.07)':(cv.src==='engine'?'rgba(68,114,196,.05)':'');
+          cells+='<td'+(bgc?' style="background:'+bgc+'"':'')+
+            (cv.src==='sheet'?' title="From the Google sheet"':'')+'>'+show+'</td>';}
+        tr.innerHTML=cells;
+        /* action buttons into the sticky cell */
+        var actTd=tr.querySelector('.stickcol');
+        var ra=el('div','ra');
+        var e=el('button','ia','&#9998;');e.title='Edit operational fields';e.onclick=function(){trackerEdit(po);};
+        ra.appendChild(e);
+        if(gtOn()){
+          var g=el('button','ia');
+          g.innerHTML=po.trackerRow?'&#8635;':'&#8593;';
+          g.title=po.trackerRow?('Row '+po.trackerRow+' in the sheet \u2014 re-sync'):'Send to the sheet';
+          if(po.trackerRow)g.style.borderColor='var(--grn)';
+          g.onclick=function(){gtPushPO(po).then(function(r){if(r)renderPage();});};
+          ra.appendChild(g);}
+        var x=el('button','ia d','&#128465;');
+        x.onclick=function(){if(!confirm('Delete PO "'+po.poNumber+'" from the app?\n\nThis does NOT remove it from the Google sheet.'))return;
+          DB.pos=DB.pos.filter(function(q){return q.id!==po.id;});sv();logA('Deleted PO','Tracker',po.poNumber);renderPage();toast('PO deleted');};
+        ra.appendChild(x);
+        actTd.appendChild(ra);
+        body.appendChild(tr);
+      })(pos[pi]);}
+    tbl.appendChild(body);sc.appendChild(tbl);}
+  tw.appendChild(sc);c.appendChild(tw);
+
+  var legend=el('div','');legend.style.cssText='margin-top:10px;font-size:11px;color:var(--muted);display:flex;gap:16px;flex-wrap:wrap';
+  legend.innerHTML='<span><b>A\u2013U</b> raised here, written to the sheet on PO creation</span>'+
+    '<span><span style="display:inline-block;width:10px;height:10px;background:rgba(68,114,196,.25);border:1px solid var(--bdr);border-radius:2px;vertical-align:middle"></span> Derived by the engine</span>'+
+    '<span><span style="display:inline-block;width:10px;height:10px;background:var(--surf);border:1px solid var(--bdr);border-radius:2px;vertical-align:middle"></span> Editable here</span>'+
+    '<span><b>V\u2013BI</b> <span style="display:inline-block;width:10px;height:10px;background:rgba(46,158,107,.25);border:1px solid var(--bdr);border-radius:2px;vertical-align:middle"></span> filled by the team in Google, read back here</span>'+
+    '<span>Row = the PO\u2019s row in the sheet</span>';
+  c.appendChild(legend);
+
+  var s=$('#dtS');
+  if(s)s.oninput=function(e){dtSrch=e.target.value;renderPage();
+    var x=$('#dtS');if(x){x.focus();x.setSelectionRange(x.value.length,x.value.length);}};}
+
+function gtColLetter(c){var s='';c++;while(c>0){c--;s=String.fromCharCode(65+(c%26))+s;c=Math.floor(c/26);}return s;}
+
+/* --- edit the manual columns --- */
 function trackerEdit(po){
-  if(!po.extra)po.extra={};var m=el('div','modal');
-  m.innerHTML='<div class="mh"><h3>Edit Tracker &middot; '+po.poNumber+'</h3><button class="ib" onclick="closeM()">&#10005;</button></div>'+
-    '<div class="mb"><p style="color:var(--muted);font-size:12px;margin-bottom:14px">Commercial fields are read-only &mdash; sourced from the Engine.</p>'+
-    '<div class="fg">'+EDIT_EXTRA.map(function(f){return '<div class="f"><label>'+f[1]+'</label><input id="ex_'+f[0]+'" value="'+(po.extra[f[0]]||'')+'"></div>';}).join('')+'</div></div>'+
-    '<div class="mf"><button class="btn bg" onclick="closeM()">Cancel</button><button class="btn bp" id="exsv">Save</button></div>';
+  var m=el('div','modal');m.style.maxWidth='860px';
+  var autoRows='',editRows='',sheetRows='';
+  for(var i=0;i<GT_COLS.length;i++){
+    var name=GT_COLS[i];var cv=gtCellValue(po,name);
+    var safe=String(cv.v==null?'':cv.v).replace(/"/g,'&quot;');
+    if(i>=GT_WRITE_COLS){
+      sheetRows+='<div class="f"><label>'+gtColLetter(i)+' &middot; '+name+'</label>'+
+        '<input value="'+safe+'" readonly style="background:rgba(46,158,107,.1);color:var(--muted);cursor:not-allowed"></div>';
+    }else if(cv.auto){
+      autoRows+='<div class="f"><label>'+gtColLetter(i)+' &middot; '+name+'</label>'+
+        '<input value="'+safe+'" readonly style="background:var(--bdr);color:var(--muted);cursor:not-allowed"></div>';
+    }else{
+      editRows+='<div class="f"><label>'+gtColLetter(i)+' &middot; '+name+'</label>'+
+        '<input id="gtx_'+i+'" value="'+safe+'"></div>';}}
+  m.innerHTML='<div class="mh"><h3>Tracker row &middot; '+po.poNumber+
+      (po.trackerRow?' <span class="pill">sheet row '+po.trackerRow+'</span>':' <span class="pill">not in sheet yet</span>')+
+      '</h3><button class="ib" onclick="closeM()">&#10005;</button></div>'+
+    '<div class="mb">'+
+      '<div style="font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:8px">Columns A&ndash;U &mdash; editable, written to the sheet</div>'+
+      '<div class="fg">'+(editRows||'<div style="font-size:12px;color:var(--muted)">Everything in A&ndash;U is derived automatically for this PO.</div>')+'</div>'+
+      '<hr class="divider">'+
+      '<div style="font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:8px">Derived from the engine &mdash; read-only</div>'+
+      '<p style="font-size:11px;color:var(--muted);line-height:1.55;margin-bottom:10px">These come from the processed sheet and the workflow. Not editable here on purpose &mdash; editing a copy of a derived figure creates a second version of the truth. Change the source instead.</p>'+
+      '<div class="fg">'+autoRows+'</div>'+
+      '<hr class="divider">'+
+      '<div style="font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:8px">Columns V&ndash;BI &mdash; owned by the Google sheet</div>'+
+      '<p style="font-size:11px;color:var(--muted);line-height:1.55;margin-bottom:10px">The team fills these in Google from column V onward. The app reads them back but never writes to them, so a re-sync can never overwrite their work. Edit these in the sheet.</p>'+
+      '<div class="fg">'+sheetRows+'</div>'+
+    '</div>'+
+    '<div class="mf"><button class="btn bg" onclick="closeM()">Cancel</button>'+
+      (gtOn()?'<button class="btn bg" id="gtxSaveSync">Save &amp; sync to sheet</button>':'')+
+      '<button class="btn bp" id="gtxSave">Save</button></div>';
   openM(m);
-  $('#exsv').onclick=function(){for(var i=0;i<EDIT_EXTRA.length;i++){var inp=$('#ex_'+EDIT_EXTRA[i][0]);if(inp)po.extra[EDIT_EXTRA[i][0]]=inp.value;}
-    sv();logA('Edited tracker','Tracker',po.poNumber);closeM();renderPage();toast('Saved');};}
+  var mb=m.querySelector('.mb');
+  if(mb)mb.appendChild(remarksPanel(po,'trk'));
+  function collect(){
+    for(var i=0;i<GT_COLS.length;i++){
+      var inp=$('#gtx_'+i);
+      if(inp)gtSetCell(po,GT_COLS[i],inp.value);}
+    sv();logA('Edited tracker','Tracker',po.poNumber);}
+  $('#gtxSave').onclick=function(){collect();closeM();renderPage();toast('Saved');};
+  var ss=$('#gtxSaveSync');
+  if(ss)ss.onclick=function(){collect();closeM();
+    gtPushPO(po).then(function(r){renderPage();});};}
+
+/* --- export the same 61 columns --- */
 function exportTracker(pos){
-  var h=TCOLS.map(function(x){return x[1];});var csvRows=[h];
-  for(var i=0;i<pos.length;i++){var po=pos[i];var d=po.extra||{};
-    csvRows.push(TCOLS.map(function(col){var vals={territory:po.territory,department:po.department,brand:po.brand,supplier:po.supplier,entity:po.entity,type:po.type,buyer:po.buyer,createdDate:po.createdDate,currency:po.currency,value:po.value,margin:po.margin,totalOptions:po.totalOptions,totalQty:po.totalQty,app:po.app,stage:po.stage,approval:po.approval,priority:po.priority,trackingId:po.trackingId,poNumber:po.poNumber,_asnNum:d._asnNum||'',_grnQty:d._grnQty||'',_grnDate:d._grnDate||'',_opsComments:d._opsComments||'',_piSub:d._piSub||'',_imgSub:d._imgSub||'',_stockReady:d._stockReady||'',_delivType:d._delivType||'',_pickup:d._pickup||'',_specialCond:d._specialCond||'',_cdcUAE:d._cdcUAE||'',_cdcKSA:d._cdcKSA||'',_cdcKWT:d._cdcKWT||'',_cdcQAT:d._cdcQAT||''};return vals[col[0]]!=null?vals[col[0]]:'';}.bind(null)));}
-  dlXLS('detailed_tracker.xls',csvRows);logA('Exported','Tracker');}
+  var head=['Sheet Row','Tracker No. (app)','PO No. (sheet)','Stage','Approval'].concat(GT_COLS);
+  var rows=[head];
+  for(var i=0;i<pos.length;i++){
+    var po=pos[i];
+    var r=[po.trackerRow||'',po.poNumber,gtSheetPoNumber(po),po.stage,po.approval];
+    for(var k=0;k<GT_COLS.length;k++)r.push(gtCellValue(po,GT_COLS[k]).v);
+    rows.push(r);}
+  dlXLS('detailed_tracker.xls',rows);logA('Exported','Tracker',pos.length+' POs');}
+
+/* --- push every approved PO that is not in the sheet yet --- */
+function gtPushAll(){
+  if(!gtOn()){toast('Connect the sheet first',true);return;}
+  var todo=[];
+  for(var i=0;i<DB.pos.length;i++){
+    var p=DB.pos[i];
+    if(p.approval==='Approved'&&p.stage!=='Cancelled')todo.push(p);}
+  if(!todo.length){toast('Nothing approved to sync');return;}
+  if(!confirm('Sync '+todo.length+' approved PO'+(todo.length!==1?'s':'')+' to the GO LIVE 2 sheet?\n\nPOs already in the sheet are updated in place, not duplicated.'))return;
+  toast('Syncing '+todo.length+' POs\u2026');
+  var done=0,failed=0;
+  /* sequential on purpose - the bridge takes a script lock per write, and firing
+     them in parallel just makes them queue behind each other and time out */
+  function next(ix){
+    if(ix>=todo.length){
+      renderPage();
+      toast('Synced '+done+' PO'+(done!==1?'s':'')+(failed?', '+failed+' failed':''),failed>0);
+      return;}
+    gtPushPO(todo[ix],true).then(function(r){
+      if(r)done++;else failed++;
+      next(ix+1);});}
+  next(0);}
+
+var gtSrch='';
+function pgGoogleTracker(c){
+  if(!gtOn()){
+    c.appendChild(el('div','tw','<div class="empty"><div class="big">&#128279;</div>The Google tracker is not connected.<br>'+
+      '<span style="font-size:12px;color:var(--muted)">Masters &amp; Settings &rarr; Google Tracker. You will need the Apps Script bridge deployed first.</span></div>'));
+    return;}
+  if(GTSTATE.err){
+    c.appendChild(el('div','','<div style="padding:12px 14px;background:rgba(214,69,69,.08);border:1px solid rgba(214,69,69,.3);border-radius:9px;font-size:12px;color:var(--red);margin-bottom:14px">'+
+      '&#9888; '+GTSTATE.err+'<br><span style="color:var(--muted)">Check the Apps Script deployment is a Web app with access set to Anyone, and that the tab name in the script matches.</span></div>'));}
+  if(!GTSTATE.loaded){
+    c.appendChild(el('div','tw','<div class="empty"><div class="big">&#8635;</div>Reading the Google tracker\u2026</div>'));
+    return;}
+  var info=el('div','dstrip');
+  info.appendChild(el('div','dchip','<div class="vl">Rows in sheet</div><div class="vv">'+GTSTATE.lastDataRow+'</div>'));
+  info.appendChild(el('div','dchip','<div class="vl">Next PO row</div><div class="vv">'+GTSTATE.nextRow+'</div>'));
+  info.appendChild(el('div','dchip','<div class="vl">Showing</div><div class="vv">'+GTSTATE.rows.length+' latest</div>'));
+  info.appendChild(el('div','dchip','<div class="vl">Last read</div><div class="vv" style="font-size:13px">'+(GTSTATE.updated?GTSTATE.updated.slice(11,16)+' UTC':'\u2014')+'</div>'));
+  c.appendChild(info);
+
+  var tw=el('div','tw');var tt=el('div','tt');
+  tt.innerHTML='<div class="srch">&#128269;<input id="gtS" placeholder="Search brand, supplier, PO number, buyer..." value="'+gtSrch+'"></div>'+
+    '<span class="pill">Live from GO LIVE 2</span>';
+  tw.appendChild(tt);
+  var sc=el('div','ts sheetview');
+  var rows=GTSTATE.rows,hdrs=GTSTATE.headers;
+  var q=gtSrch.trim().toLowerCase();
+  var out=[];
+  for(var i=0;i<rows.length;i++){
+    var rowNo=GTSTATE.firstRow+i;
+    if(q&&rows[i].join(' ').toLowerCase().indexOf(q)<0)continue;
+    out.push({no:rowNo,cells:rows[i]});}
+  if(!out.length)sc.appendChild(el('div','empty','<div class="big">&#128269;</div>No rows match.'));
+  else{
+    var t=el('table');
+    var th='<thead><tr><th class="rowno">Row</th>'+hdrs.map(function(h){return '<th>'+String(h||'')+'</th>';}).join('')+'</tr></thead><tbody>';
+    /* newest first is what people want to see on a 3,600-row tracker */
+    for(var r=out.length-1;r>=0;r--){
+      th+='<tr><td class="rowno">'+out[r].no+'</td>'+
+        hdrs.map(function(_,ci){var v=out[r].cells[ci];return '<td>'+(v==null||v===''?'<span style="color:var(--grey)">&mdash;</span>':String(v))+'</td>';}).join('')+'</tr>';}
+    t.innerHTML=th+'</tbody>';
+    sc.appendChild(t);}
+  tw.appendChild(sc);c.appendChild(tw);
+  var si=$('#gtS');if(si)si.oninput=function(e){gtSrch=e.target.value;renderPage();var x=$('#gtS');if(x){x.focus();x.setSelectionRange(x.value.length,x.value.length);}};}
+
 
 /* ===== VENDOR MASTER ===== */
 var vmSrch='',vmFilt='';
@@ -2917,9 +3920,11 @@ function pgMasters(c){
     var b=el('button','btn bg bs','&#43;');b.onclick=function(){var i=$('#ma_'+k);if(!i)return;var v=i.value.trim();if(!v)return;if(DB.masters[k].indexOf(v)>=0){toast('Already exists',true);return;}DB.masters[k].push(v);sv();renderPage();toast('Added');};
     add.appendChild(b);box.appendChild(add);g.appendChild(box);})(keys[ki]);}
   c.appendChild(g);
+  c.appendChild(eventNotifyCard());
   c.appendChild(notifyRoleCard('planning','Planning'));
   c.appendChild(notifyRoleCard('operations','Operations'));
-  c.appendChild(pidMasterCard());}
+  c.appendChild(pidMasterCard());
+  c.appendChild(gtSettingsCard());}
 
 function pidMasterCard(){
   var card=el('div','card');card.style.marginTop='18px';card.id='pidMasterCard';
@@ -2941,6 +3946,51 @@ function pidMasterCard(){
   },0);
   return card;}
 function clearPidDump(source){PID[source]={fileName:'',uploadedDate:'',barcodes:{},count:0};renderPage();toast('Cleared');}
+
+/* Per-step notification recipients. Kept separate from the Planning/Operations
+   lists because those are workflow handoffs; these are subscriptions. */
+function eventNotifyCard(){
+  var card=el('div','card');card.style.marginTop='18px';card.id='evtCard';
+  buildEventCard(card);
+  return card;}
+function buildEventCard(card){
+  if(!DB.prefs.notifyEvents)DB.prefs.notifyEvents={};
+  var h='<b style="font-weight:800">&#128276; Step Notifications</b>'+
+    '<p style="color:var(--muted);font-size:12px;margin:6px 0 12px;line-height:1.6">'+
+      'Email people as a PO moves. Add recipients per event so nobody is subscribed to noise they do not need. '+
+      'A recipient with a Web3Forms key sends silently; without one it opens a pre-filled draft.</p>';
+  for(var i=0;i<NOTIFY_EVENTS.length;i++){
+    var ev=NOTIFY_EVENTS[i];
+    var list=eventList(ev.k);
+    var chips='';
+    for(var j=0;j<list.length;j++){
+      chips+='<div class="chip"><span>'+list[j].email+(list[j].key?' &#9889;':'')+'</span>'+
+        '<button type="button" onclick="removeEventRecipient(\''+ev.k+'\',\''+list[j].email+'\')">&#10005;</button></div>';}
+    h+='<div style="border:1px solid var(--bdr);border-radius:10px;padding:11px;margin-bottom:9px;background:var(--surf2)">'+
+      '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">'+
+        '<div><b style="font-size:13px">'+ev.l+'</b>'+
+        '<div style="font-size:11px;color:var(--muted);margin-top:2px">'+ev.d+'</div></div>'+
+        '<span class="pill">'+list.length+' recipient'+(list.length!==1?'s':'')+'</span></div>'+
+      '<div class="chips">'+(chips||'<span style="font-size:11px;color:var(--muted)">Nobody subscribed</span>')+'</div>'+
+      '<div class="madd">'+
+        '<input id="ev_'+ev.k+'_email" type="email" placeholder="Add email...">'+
+        '<input id="ev_'+ev.k+'_key" placeholder="Access key (optional)" style="max-width:210px">'+
+        '<button class="btn bp bs" type="button" onclick="addEventRecipient(\''+ev.k+'\')">&#43;</button>'+
+      '</div></div>';}
+  card.innerHTML=h;}
+function addEventRecipient(evt){
+  var e=$('#ev_'+evt+'_email'),k=$('#ev_'+evt+'_key');
+  var v=(e.value||'').trim(),key=(k.value||'').trim();
+  if(!/^\S+@\S+\.\S+$/.test(v)){toast('Enter a valid email',true);return;}
+  if(!DB.prefs.notifyEvents)DB.prefs.notifyEvents={};
+  if(!DB.prefs.notifyEvents[evt])DB.prefs.notifyEvents[evt]=[];
+  var L=DB.prefs.notifyEvents[evt];
+  for(var i=0;i<L.length;i++)if(L[i].email.toLowerCase()===v.toLowerCase()){toast('Already subscribed',true);return;}
+  L.push({email:v,key:key});sv();renderPage();toast('Added '+v);}
+function removeEventRecipient(evt,email){
+  var L=(DB.prefs.notifyEvents&&DB.prefs.notifyEvents[evt])||[];
+  for(var i=0;i<L.length;i++)if(L[i].email.toLowerCase()===String(email).toLowerCase()){
+    L.splice(i,1);sv();renderPage();toast('Removed '+email);return;}}
 
 function notifyRoleCard(role,label){
   var card=el('div','card');card.style.marginTop='18px';card.id='ncard_'+role;
@@ -3423,6 +4473,10 @@ window.removeVendorE= removeVendorE;
 window.addBrandE    = addBrandE;
 window.removeBrandE = removeBrandE;
 window.addICComment = addICComment;
+window.addRemark    = addRemark;
+window.remarksPanel = remarksPanel;
+window.allRemarks   = allRemarks;
+window.setStage     = setStage;
 window.closeM       = closeM;
 window.downloadExcel= downloadExcel;
 window.toggleReplicate  = toggleReplicate;
@@ -3436,12 +4490,16 @@ window.notifyRemove     = notifyRemove;
 window.removeNotify     = removeNotify;
 window.notifyEdit       = notifyEdit;
 window.notifyTest       = notifyTest;
+window.addEventRecipient    = addEventRecipient;
+window.removeEventRecipient = removeEventRecipient;
 window.clearPidDump     = clearPidDump;
 window.renderPage       = renderPage;
 window.sheetViewerModal = sheetViewerModal;
 window.downloadPOExcel  = downloadPOExcel;
 window.planningApprove  = planningApprove;
 window.planningReject   = planningReject;
+window.gtPushPO         = gtPushPO;
+window.gtPull           = gtPull;
 window.ENG              = ENG;
 
 /* ===== BOOT ===== */
@@ -3454,6 +4512,13 @@ if(isUnlocked(ST.role))go(RLANDING[ST.role],{},false);
 else{go(RLANDING[ST.role],{},false);showLock(ST.role);}
 cloudInit();
 updateSyncBadge();
+gtLoadCfg();
+if(gtOn()){gtPull({}).then(function(){
+  gtStartPolling();
+  /* the engine's summary shows the next free row - repaint once the first read
+     lands so it is not left saying "reading the tracker..." */
+  if(ST.page==='engine'||ST.page==='tracker'||ST.page==='planning')renderPage();
+});}
 })();
 </script>
 </body>
