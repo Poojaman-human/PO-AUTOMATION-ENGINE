@@ -5,6 +5,15 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>PO Automation Engine</title>
 <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+<script>
+/* Corporate networks and proxies often block CDNs. If the Excel library did not
+   load from the primary host, try a second one before the app gives up. The app
+   still works without it - it falls back to CSV - but Excel output with live
+   formulas needs this library. */
+if(typeof XLSX==='undefined'){
+  document.write('<script src="https://unpkg.com/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"><\/script>');
+}
+</script>
 <style>
 :root{--bg:#f0f4fb;--surf:#fff;--surf2:#f7f9ff;--bdr:#e4e8f2;--txt:#1a2236;--muted:#6b7390;
 --pri:#1f3864;--pri2:#4472c4;--acc:#e8703a;--grn:#2e9e6b;--yel:#d4920a;--red:#d64545;--grey:#9aa1b8;
@@ -213,6 +222,18 @@ tbody tr:last-child td{border-bottom:none}
 .dfb div{color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dft{color:var(--muted);font-size:11px;white-space:nowrap}
 .dmini{padding:26px!important}
+/* --- spreadsheet-style viewer --- */
+.fxbar{display:flex;align-items:center;gap:0;border:1px solid var(--bdr);border-radius:8px;overflow:hidden;margin-bottom:10px;background:var(--surf)}
+.fxref{min-width:74px;padding:7px 10px;background:var(--surf2);border-right:1px solid var(--bdr);font-weight:800;font-size:12px;font-variant-numeric:tabular-nums;text-align:center}
+.fxfx{padding:7px 10px;border-right:1px solid var(--bdr);font-style:italic;font-weight:700;color:var(--muted);font-size:12px}
+.fxval{padding:7px 11px;font-size:12px;font-family:ui-monospace,Menlo,Consolas,monospace;overflow-x:auto;white-space:nowrap;flex:1}
+.sheetview table{border-collapse:separate;border-spacing:0}
+.sheetview td{cursor:cell;transition:background .1s}
+.sheetview td.cellf{background:rgba(68,114,196,.05)}
+.sheetview td.cellf:hover{background:rgba(68,114,196,.16)}
+.sheetview td.selc{outline:2px solid var(--pri2);outline-offset:-2px;background:rgba(68,114,196,.2)!important}
+.sheetview .rowno{background:var(--surf2);color:var(--muted);font-weight:800;font-size:11px;text-align:center;position:sticky;left:0;z-index:1;cursor:default;min-width:38px}
+.sheetview thead th{font-size:10px}
 .warnbar{display:flex;align-items:flex-start;gap:10px;padding:11px 14px;border-radius:10px;background:rgba(232,112,58,.09);border:1px solid rgba(232,112,58,.35);color:var(--acc);font-size:12px;line-height:1.55;margin-bottom:16px}
 .warnbar b{color:var(--acc)}
 .dpanel{position:fixed;top:58px;right:14px;z-index:95;width:300px;background:var(--surf);border:1px solid var(--bdr);border-radius:12px;box-shadow:0 14px 38px rgba(10,15,30,.25);padding:15px;display:none}
@@ -609,7 +630,7 @@ function cloudShareLink(){
 var DBK='po_v3';
 var SEED={vendors:[],brands:['Nike','Adidas','Puma','Zara'],
   masters:{territory:['UAE','KSA','KWT','QAT'],country:['UAE','Saudi Arabia','Kuwait','Qatar'],
-    department:['Footwear','Apparel','Accessories'],collection:['SS26','FW25','Core'],
+    department:['Apparel','FF','Modest','Footwear','Innerwear','Accessories'],collection:['SS26','FW25','Core'],
     orderType:['New','Replenishment'],priority:['High','Medium','Low'],
     deliveryType:['Sort','Non-Sort','Import'],
     dropReason:['Image Issue','Attribute Issue','Compliance Issue','Duplicate Product','Pricing Issue','Vendor Issue','Content Missing','Other']},
@@ -619,6 +640,14 @@ function load(){try{DB=JSON.parse(lsGet(DBK));}catch(e){DB=null;}
   if(!DB)DB=JSON.parse(JSON.stringify(SEED));
   for(var k in SEED){if(!(k in DB))DB[k]=JSON.parse(JSON.stringify(SEED[k]));}
   for(var m in SEED.masters){if(!DB.masters[m])DB.masters[m]=SEED.masters[m].slice();}
+  /* Union in any master values added to SEED since this browser last saved, so a
+     new category shows up without discarding values the user added themselves. */
+  for(var mm in SEED.masters){
+    if(!Array.isArray(DB.masters[mm]))continue;
+    var have={};for(var hv=0;hv<DB.masters[mm].length;hv++)have[String(DB.masters[mm][hv]).toLowerCase()]=1;
+    for(var sd=0;sd<SEED.masters[mm].length;sd++){
+      var val=SEED.masters[mm][sd];
+      if(!have[String(val).toLowerCase()])DB.masters[mm].push(val);}}
   if(!DB.prefs.notify){
     DB.prefs.notify={planning:[],operations:[]};
     var oldE=DB.prefs.emails||{};var oldW=DB.prefs.web3forms||{};
@@ -687,6 +716,16 @@ var TERR_LIST=['UAE','KSA','QAT','KWT'];
 var TERR_LABEL={UAE:'UAE',KSA:'KSA',QAT:'Qatar',KWT:'Kuwait'};
 var TERR_MATCH={UAE:['uae'],KSA:['ksa','saudi'],QAT:['qat','qatar'],KWT:['kwt','kuwait']};
 var TERR_DEFAULT_MULT={KWT:0.084,KSA:+(1.15/1.05).toFixed(6)};
+/* Dummy RRP derivation rules, applied to the vendor's ORIGINAL RRP column.
+   dp = decimal places: KSA and Qatar retail prices are whole units, Kuwaiti
+   dinar is quoted to 2 (it is a high-value currency, so fils matter).
+   Each formula is wrapped in ROUND in the output so the stored value equals the
+   displayed value. */
+var DUMMY_RULES={
+  KSA:{expr:'/1.05*1.15',dp:0},
+  KWT:{expr:'*0.084',dp:2},
+  QAT:{expr:'',dp:0},
+  UAE:{expr:'',dp:0}};
 
 /* ===== STATE ===== */
 var ST={role:'buyer',page:'engine',params:{},hist:[]};
@@ -1032,7 +1071,7 @@ function dshExport(pos){
   dlXLS('dashboard_view.xls',rows);logA('Exported','Dashboard',pos.length+' POs');}
 
 /* ===== ENGINE ===== */
-var ENG={step:1,type:'Marketplace',terr:'UAE',cur:'AED',margin:35,brand:'',buyer:'',prio:'Medium',vname:'',vendorId:null,result:null};
+var ENG={step:1,type:'Marketplace',terr:'UAE',cur:'AED',margin:35,brand:'',buyer:'',prio:'Medium',vname:'',vendorId:null,result:null,dummyRRP:true};
 function pgEngine(c){
   c.appendChild(el('div','ph','<h1>&#9889; Create PO</h1><p>Configure &rarr; Upload vendor sheet &rarr; Output + Summary &rarr; Launch lifecycle</p>'));
   var sb=el('div','step-bar');
@@ -1087,13 +1126,43 @@ function engStep1(c){
   $('#e_terr').onchange=function(e){var cfg=TCFG[e.target.value];if(cfg)$('#e_cur').value=cfg.cur;};}
 
 function renderEngNotifyChips(){
+  /* NOTE: `role` must be captured inside the IIFE alongside the index. With `var`
+     it is function-scoped, so every click handler would read the LAST role in the
+     loop ('operations') and delete from the wrong list - the chip you clicked
+     appeared to stay put while a different email silently disappeared.
+     Removing by EMAIL rather than by index is also deliberate: indexes go stale
+     if the list changes between render and click. */
   var roles=[['planning','e_plChips'],['operations','e_opChips']];
-  for(var r=0;r<roles.length;r++){var role=roles[r][0];var elId=roles[r][1];var box=$('#'+elId);if(!box)continue;box.innerHTML='';
+  for(var r=0;r<roles.length;r++){
+    var role=roles[r][0];var elId=roles[r][1];
+    var box=$('#'+elId);if(!box)continue;
+    box.innerHTML='';
     var list=notifyList(role);
-    for(var i=0;i<list.length;i++){(function(idx){
-      var chip=el('div','chip','<span>'+list[idx].email+(list[idx].key?' &#9889;':'')+'</span>');var x=el('button',null,'&#10005;');
-      x.onclick=function(){DB.prefs.notify[role].splice(idx,1);sv();renderEngNotifyChips();toast('Removed');};
-      chip.appendChild(x);box.appendChild(chip);})(i);}}}
+    if(!list.length){
+      box.appendChild(el('div','','<span style="font-size:11px;color:var(--muted)">None added yet</span>'));
+      continue;}
+    for(var i=0;i<list.length;i++){
+      (function(rl,email,hasKey){
+        var chip=el('div','chip','<span>'+email+(hasKey?' &#9889;':'')+'</span>');
+        var x=el('button',null,'&#10005;');
+        x.title='Remove '+email;
+        x.onclick=function(ev){
+          if(ev){ev.preventDefault();ev.stopPropagation();}
+          removeNotify(rl,email);};
+        chip.appendChild(x);box.appendChild(chip);
+      })(role,list[i].email,!!list[i].key);}}}
+
+/* Remove by email address so it cannot hit the wrong entry. */
+function removeNotify(role,email){
+  if(!DB.prefs.notify||!DB.prefs.notify[role]){toast('Nothing to remove',true);return;}
+  var list=DB.prefs.notify[role];
+  for(var i=0;i<list.length;i++){
+    if(String(list[i].email).toLowerCase()===String(email).toLowerCase()){
+      list.splice(i,1);sv();
+      renderEngNotifyChips();
+      var d=$('#ncard_'+role);if(d)renderPage();
+      toast('Removed '+email);return;}}
+  toast('Already removed',true);}
 function engAddNotify(role){
   var inp=$(role==='planning'?'#e_plAdd':'#e_opAdd');var v=(inp.value||'').trim();
   if(!v){toast('Enter an email',true);return;}
@@ -1307,6 +1376,55 @@ function engStep3(c){
     '<div class="ts"><table>'+thead+'<tbody>'+tbhtml+'</tbody></table></div>';
   c.appendChild(tw);
   terrPanel(c);
+  /* ---- drop preview: what will land in the Dropped tab ---- */
+  var DP=computeDrops(R);
+  var dropCard=el('div','card');dropCard.style.marginTop='16px';
+  var reasonCounts={};
+  for(var dpi=0;dpi<DP.dropped.length;dpi++){
+    var rs=DP.dropped[dpi]._reasons;
+    for(var rj=0;rj<rs.length;rj++){
+      var key=rs[rj].indexOf('Kids')===0?'Kids clothing':'Fewer than '+DROP_MIN_COUNT+' sizes';
+      reasonCounts[key]=(reasonCounts[key]||0)+1;}}
+  var rcHtml='';
+  for(var rk in reasonCounts)
+    rcHtml+='<div style="display:flex;justify-content:space-between;font-size:12px;padding:3px 0"><span style="color:var(--muted)">'+rk+'</span><b>'+reasonCounts[rk]+' row'+(reasonCounts[rk]!==1?'s':'')+'</b></div>';
+  dropCard.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">'+
+      '<h3 style="font-weight:800;font-size:14px">Drop check</h3>'+
+      '<span class="pill">'+DP.kept.length+' kept &middot; '+DP.dropped.length+' dropped</span></div>'+
+    '<p style="color:var(--muted);font-size:12px;line-height:1.55;margin-bottom:'+(DP.dropped.length?'10':'0')+'px">'+
+      'Applied only to lines the PID check tagged <b>New</b>. Replenishment lines pass through untouched, and so do lines with no PID match &mdash; nothing is dropped on missing evidence.'+
+      ' The kids rule applies to <b>clothing only</b> \u2014 kids footwear, accessories and similar are kept.'+
+      (DP.catCols.length?' Category read from: <b>'+DP.kidsColName+'</b>.':
+        (DP.deptIsKids?' No category column found, so the Step 1 department (<b>'+ENG.dept+'</b>) is being used.':
+         ' <span style="color:var(--acc)">No category column found on this sheet, so the kids rule cannot run.</span>'))+
+      '</p>'+
+    ((DP.kidsFootwearKept||DP.ambiguous)?'<div style="padding:8px 11px;background:rgba(68,114,196,.08);border:1px solid rgba(68,114,196,.3);border-radius:8px;font-size:11px;color:var(--pri2);line-height:1.5;margin-bottom:10px">'+
+      (DP.kidsFootwearKept?'&#8505; '+DP.kidsFootwearKept+' kids row'+(DP.kidsFootwearKept!==1?'s':'')+' kept because the category is not clothing (footwear / accessories).':'')+
+      (DP.kidsFootwearKept&&DP.ambiguous?'<br>':'')+
+      (DP.ambiguous?'&#9888; '+DP.ambiguous+' row'+(DP.ambiguous!==1?'s':'')+' mention kids but nothing identifies them as clothing \u2014 kept rather than guessed. Check the category column if these should have dropped.':'')+
+      '</div>':'')+
+    (DP.dropped.length?'<div style="background:var(--surf2);border:1px solid var(--bdr);border-radius:9px;padding:10px 12px">'+rcHtml+'</div>'+
+      '<p style="font-size:11px;color:var(--muted);margin-top:8px">These rows are excluded from the PO Sheet tab and listed with their reason in the <b>Dropped</b> tab.</p>'
+      :'<div style="padding:9px 11px;background:rgba(46,158,107,.08);border:1px solid rgba(46,158,107,.3);border-radius:8px;font-size:12px;color:var(--grn)">&#10003; Nothing dropped &mdash; every New line met the minimum size count and none were kids clothing.</div>');
+  c.appendChild(dropCard);
+
+  /* ---- download options ---- */
+  var others=['UAE','KSA','KWT','QAT'].filter(function(t){return t!==ENG.terr;});
+  var optCard=el('div','card');optCard.style.marginTop='16px';
+  optCard.innerHTML='<div style="font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:10px">Download options</div>'+
+    '<label style="display:flex;align-items:flex-start;gap:9px;cursor:pointer">'+
+      '<input type="checkbox" id="e_dummyChk" '+(ENG.dummyRRP!==false?'checked':'')+' style="width:16px;height:16px;margin-top:2px;flex-shrink:0">'+
+      '<span><b style="font-size:13px">Include dummy RRP columns</b>'+
+      '<div style="font-size:12px;color:var(--muted);line-height:1.55;margin-top:3px">'+
+        'Adds a retail price column for '+others.map(function(t){return TERR_LABEL[t]||t;}).join(', ')+', calculated from the vendor\'s original '+
+        (ENG.terr?(TERR_LABEL[ENG.terr]||ENG.terr):'')+' RRP by live formula (KSA \u00f71.05\u00d71.15 rounded to 0dp, Kuwait \u00d70.084 rounded to 2dp, Qatar same value rounded to 0dp). '+
+        'Untick if this PO is for '+(TERR_LABEL[ENG.terr]||ENG.terr)+' only.</div></span></label>'+
+    '<div style="margin-top:10px;padding:9px 11px;background:var(--surf2);border:1px solid var(--bdr);border-radius:8px;font-size:11px;color:var(--muted);line-height:1.5">'+
+      '&#10003; Barcodes, style codes and other identifiers are written back <b>exactly as the vendor sent them</b> \u2014 kept as text, so long barcodes keep every digit and leading zeros survive.'+'<div style="margin-top:7px">&#128209; Four tabs: <b>Original</b> (your file untouched) &middot; <b>PO Sheet</b> (processed, dropped rows removed) &middot; <b>Summary</b> &middot; <b>Dropped</b> (with reasons)</div></div>';
+  c.appendChild(optCard);
+  var chk=$('#e_dummyChk');
+  if(chk)chk.onchange=function(e){ENG.dummyRRP=e.target.checked;renderPage();};
+
   var bar=el('div','');bar.style.cssText='display:flex;gap:10px;margin-top:16px;justify-content:flex-end;flex-wrap:wrap';
   var dlB=el('button','btn bp','&#11015; Download Excel (Sheet1 + Summary)');dlB.onclick=downloadExcel;
   var lcB=el('button','btn bg','&#128640; Create PO &amp; Start Lifecycle &rarr;');lcB.onclick=createPOFromEngine;
@@ -1401,23 +1519,207 @@ function terrPanel(c){
     panel.appendChild(tblCard);}
   c.appendChild(panel);}
 
+function xlsxReady(){try{return typeof XLSX!=='undefined'&&XLSX&&XLSX.utils&&XLSX.utils.book_new;}catch(e){return false;}}
+
+/* Plain CSV of the same Sheet1 columns, used when the Excel library is blocked.
+   Values instead of formulas, but the buyer is not stuck waiting on IT. */
+function downloadCSVFallback(){
+  var R=ENG.result;if(!R){toast('Process a sheet first',true);return;}
+  var hasQty=R.hasQty;
+  var head=R.headers.slice().concat(['CONCAT','COUNT','OPTIONS','RRP EX-VAT ('+ENG.cur+')','COST EX-VAT ('+ENG.cur+')']);
+  if(hasQty)head.push('TOTAL VALUE ('+ENG.cur+')');
+  var others=['UAE','KSA','KWT','QAT'].filter(function(t){return t!==ENG.terr;});
+  if(ENG.dummyRRP!==false)for(var d=0;d<others.length;d++)head.push('DUMMY RRP '+others[d]);
+  if(R.hasBarcode){head.push('TYPE');head.push('PID SOURCE');}
+  var lines=[head];
+  var cl=R.outRows.map(function(r){return r.concat;});
+  for(var i=0;i<R.outRows.length;i++){
+    var rw=R.outRows[i];var cnt=0;
+    for(var c=0;c<cl.length;c++)if(cl[c]===rw.concat)cnt++;
+    var row=rw.orig.slice();
+    row.push(rw.concat,cnt,rw.opt,rw.rrpEx.toFixed(2),rw.costEx.toFixed(2));
+    if(hasQty)row.push(rw.totalVal!=null?rw.totalVal.toFixed(2):'');
+    if(ENG.dummyRRP!==false)for(var o=0;o<others.length;o++){
+      var t=others[o];var base=rw.rrpEx*(R.cfg.vat||1);  /* back to inc-VAT original */
+      var rl=DUMMY_RULES[t]||{expr:'',dp:2};
+      var v=t==='KSA'?base/1.05*1.15:t==='KWT'?base*0.084:base;
+      var f=Math.pow(10,rl.dp);
+      row.push((Math.round(v*f)/f).toFixed(rl.dp));}
+    if(R.hasBarcode){row.push(rw.itemType||'');row.push(rw.pidSource||'');}
+    lines.push(row);}
+  var csv=lines.map(function(r){return r.map(function(v){
+    var x=String(v==null?'':v);
+    return /[",\n]/.test(x)?'"'+x.replace(/"/g,'""')+'"':x;}).join(',');}).join('\n');
+  var blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'});
+  var a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download='PO_'+ENG.type+'_'+ENG.terr+'_'+String(ENG.vname||'vendor').replace(/\s+/g,'_')+'.csv';
+  a.click();setTimeout(function(){URL.revokeObjectURL(a.href);},1200);
+  logA('Downloaded CSV fallback','Engine',ENG.vname||'');}
+
+/* ===== DROP RULES =====
+   Applied ONLY to rows the PID barcode check tagged as New. Replenishment lines
+   are already selling, so they pass through untouched whatever their size count
+   or age group. Rows with an Unknown tag (no barcode column, or no PID dump
+   loaded) are also left alone - we do not drop on missing evidence.
+
+   Rule 1: fewer than DROP_MIN_COUNT sizes in an option. A style-colour offered
+           in one or two sizes is not worth listing.
+   Rule 2: kids clothing, identified from the clothing-id / category column. */
+var DROP_MIN_COUNT=3;
+var KIDS_RE=/(^|[^a-z])(kid|kids|kidswear|child|children|childrens|boy|boys|girl|girls|infant|infants|toddler|junior|juniors|baby|babies|newborn|new born)([^a-z]|$)/i;
+/* Categories the kids rule DOES apply to - clothing in its various forms. */
+var CLOTHING_RE=/(clothing|apparel|garment|wear|modest|abaya|jalabiya|kaftan|innerwear|inner wear|lingerie|nightwear|sleepwear|hosiery|denim|top|bottom|dress|shirt|trouser|jacket|outerwear)/i;
+/* Categories the kids rule must NOT apply to, even when the line says kids.
+   Checked after CLOTHING_RE and wins over it, because a value like
+   "Kids Footwear" contains "wear" and would otherwise look like clothing. */
+var NON_CLOTHING_RE=/(footwear|shoe|sandal|slipper|sneaker|trainer|boot|accessor|bag|backpack|watch|jewel|eyewear|sunglass|belt|cap|hat|scarf|sock|fragrance|beauty|cosmetic|toy|equipment|luggage)/i;
+var KIDS_COL_HINTS=['clothing id','clothingid','clothing','age group','agegroup','category','class','division','department','dept','gender','segment','sub department','subdepartment','group','product type','producttype','merch'];
+
+/* Every column that might carry a category signal, not just the first match -
+   a sheet often splits it across "Department" and "Category". */
+function findCategoryCols(headers){
+  var h=headers.map(function(x){return String(x||'').toLowerCase().trim();});
+  var out=[];
+  for(var c=0;c<h.length;c++){
+    for(var i=0;i<KIDS_COL_HINTS.length;i++){
+      if(h[c].indexOf(KIDS_COL_HINTS[i])>=0){out.push(c);break;}}}
+  return out;}
+function findKidsCol(headers){var c=findCategoryCols(headers);return c.length?c[0]:-1;}
+
+/* Shared by the on-screen preview and the workbook build, so what the buyer is
+   shown before downloading is exactly what the file contains. */
+function computeDrops(R){
+  var counts={},i,j;
+  for(i=0;i<R.outRows.length;i++){
+    var k=R.outRows[i].concat;
+    counts[k]=(counts[k]||0)+1;}
+  var catCols=findCategoryCols(R.headers);
+  var deptTxt=String(ENG.dept||'');
+  var kept=[],dropped=[],lowCount=0,kidsCount=0,kidsFootwearKept=0,ambiguous=0;
+  for(i=0;i<R.outRows.length;i++){
+    var rw=R.outRows[i];
+    var cnt=counts[rw.concat]||0;
+    rw._count=cnt;
+    var reasons=[];
+    if(rw.itemType==='New'){
+      if(cnt<DROP_MIN_COUNT)reasons.push('Only '+cnt+' size'+(cnt!==1?'s':'')+' in this option (minimum '+DROP_MIN_COUNT+')');
+      /* build one text blob from every category-ish column plus the Step 1 department */
+      var parts=[];
+      for(j=0;j<catCols.length;j++){
+        var v=rw.orig[catCols[j]];
+        if(v!=null&&String(v).trim())parts.push(String(v));}
+      var rowTxt=parts.join(' ');
+      /* Kids can be flagged by the row OR by the PO's department. */
+      var isKids=KIDS_RE.test(rowTxt)||KIDS_RE.test(deptTxt);
+      if(isKids){
+        /* Decide clothing-vs-not from the ROW's own category first. The Step 1
+           department is only a fallback - otherwise a PO marked "Footwear"
+           would rescue a row whose own category clearly says "Kids Clothing",
+           and vice versa. Row-level data always wins. */
+        var src='',verdict='';
+        if(NON_CLOTHING_RE.test(rowTxt)){verdict='keep';src=rowTxt;}
+        else if(CLOTHING_RE.test(rowTxt)){verdict='drop';src=rowTxt;}
+        else if(NON_CLOTHING_RE.test(deptTxt)){verdict='keep';src='department: '+deptTxt;}
+        else if(CLOTHING_RE.test(deptTxt)){verdict='drop';src='department: '+deptTxt;}
+        else{verdict='unclear';src=rowTxt||deptTxt;}
+        if(verdict==='drop')reasons.push('Kids clothing ('+src+')');
+        else if(verdict==='keep'){
+          kidsFootwearKept++;
+          rw._kidsNote='Kids but not clothing ('+src+') - kept';
+        }else{
+          ambiguous++;
+          rw._kidsNote='Kids but category unclear ('+src+') - kept';}}}
+    rw._reasons=reasons;
+    if(reasons.length){
+      dropped.push(rw);
+      if(reasons.join(' ').indexOf('size')>=0)lowCount++;
+      if(reasons.join(' ').indexOf('Kids')>=0)kidsCount++;
+    }else kept.push(rw);}
+  return {kept:kept,dropped:dropped,counts:counts,
+    catCols:catCols,
+    kidsCol:catCols.length?catCols[0]:-1,
+    kidsColName:catCols.map(function(c){return R.headers[c];}).join(', '),
+    deptIsKids:KIDS_RE.test(deptTxt),
+    lowCount:lowCount,kidsCount:kidsCount,
+    kidsFootwearKept:kidsFootwearKept,ambiguous:ambiguous};}
+
 function downloadExcel(){
-  var R=ENG.result;var hasQty=R.hasQty;var cfg=R.cfg;var wb=XLSX.utils.book_new();
-  var origH=R.headers;var origLen=origH.length;
+  var R=ENG.result;
+  if(!R){toast('Process a vendor sheet first',true);return;}
+  if(!xlsxReady()){
+    toast('Excel library blocked by your network \u2014 downloading CSV instead',true);
+    downloadCSVFallback();return;}
+  var D=computeDrops(R);
+  buildWorkbookFromCtx({
+    headers:R.headers,data:R.data,kept:D.kept,dropped:D.dropped,
+    cfg:R.cfg,hasQty:R.hasQty,hasBarcode:R.hasBarcode,
+    cur:ENG.cur,margin:ENG.margin,terr:ENG.terr,type:ENG.type,vname:ENG.vname,dept:ENG.dept,
+    dummyRRP:ENG.dummyRRP!==false},null);
+  logA('Downloaded Excel','Engine',ENG.vname+' | kept '+D.kept.length+', dropped '+D.dropped.length);}
+
+/* Context-driven workbook build. Used by the buyer straight after processing and
+   by Planning / Operations from the snapshot stored on the PO, so every role
+   downloads a byte-identical file. */
+function buildWorkbookFromCtx(CTX,poNumber){
+  var wb=XLSX.utils.book_new();
+  var hasQty=CTX.hasQty;var cfg=CTX.cfg;
+  var origH=CTX.headers;var origLen=origH.length;
+  var keptRows=CTX.kept;
+  var D={kept:CTX.kept,dropped:CTX.dropped};
+  var ENGX={cur:CTX.cur,margin:CTX.margin,terr:CTX.terr,type:CTX.type,vname:CTX.vname,dummyRRP:CTX.dummyRRP};
+
   function colL(c){var s='';c++;while(c>0){c--;s=String.fromCharCode(65+(c%26))+s;c=Math.floor(c/26);}return s;}
   var HDR_STYLE={font:{bold:true,color:{rgb:'FFFFFF'},sz:11},fill:{fgColor:{rgb:'1F3864'}},alignment:{horizontal:'center'}};
+  var DROP_HDR_STYLE={font:{bold:true,color:{rgb:'FFFFFF'},sz:11},fill:{fgColor:{rgb:'C0504D'}},alignment:{horizontal:'center'}};
+  var ORIG_HDR_STYLE={font:{bold:true,color:{rgb:'FFFFFF'},sz:11},fill:{fgColor:{rgb:'7F7F7F'}},alignment:{horizontal:'center'}};
   var CALC_STYLE={fill:{fgColor:{rgb:'DDEEFF'}}};
   var TERR_STYLE={fill:{fgColor:{rgb:'E2EFDA'}}};
+  var DROP_CELL={fill:{fgColor:{rgb:'FCE4E4'}}};
+
   function setCell(ws,r,c,val,isFormula,style){
     var addr=colL(c)+(r+1);var cell;
     if(isFormula){cell={t:'n',f:val,v:0};}
     else if(typeof val==='number'){cell={t:'n',v:val};}
     else{cell={t:'s',v:String(val!=null?val:'')};}
-    if(style)cell.s=style;
+    if(style){
+      if(style.numFmt){cell.z=style.numFmt;
+        var s2={};for(var k in style)if(k!=='numFmt')s2[k]=style[k];
+        if(Object.keys(s2).length)cell.s=s2;}
+      else cell.s=style;}
     if(!ws['!ref'])ws['!ref']='A1';ws[addr]=cell;}
   function expandRange(ws,maxR,maxC){ws['!ref']='A1:'+colL(maxC)+(maxR+1);}
 
-  /* ===== Find source columns ===== */
+  /* identifier columns stay text so barcodes survive byte for byte */
+  var TEXT_COL={};
+  for(var tc=0;tc<origH.length;tc++){
+    var th=String(origH[tc]||'').toLowerCase();
+    if(th.indexOf('barcode')>=0||th.indexOf('ean')>=0||th.indexOf('upc')>=0||
+       th.indexOf('sku')>=0||th.indexOf('style')>=0||th.indexOf('article')>=0||
+       th.indexOf('item code')>=0||th.indexOf('material')>=0)TEXT_COL[tc]=1;}
+  function looksLikeId(v){
+    var t=String(v==null?'':v).trim();
+    if(!t)return false;
+    if(!/^[0-9]+$/.test(t))return false;
+    return t.length>=12||/^0/.test(t);}
+  function writeOrigCell(ws,wsRow,oi,ov,style){
+    if(TEXT_COL[oi]||looksLikeId(ov)){
+      var st={numFmt:'@'};if(style&&style.fill)st.fill=style.fill;
+      setCell(ws,wsRow,oi,String(ov==null?'':ov),false,st);return;}
+    var nv=parseFloat(ov);
+    setCell(ws,wsRow,oi,(!isNaN(nv)&&ov!==''&&String(nv)===String(ov).trim())?nv:ov,false,style||null);}
+
+  /* ================= SHEET 1: Original (verbatim) ================= */
+  var wsO={};
+  for(var oh=0;oh<origH.length;oh++)setCell(wsO,0,oh,origH[oh],false,ORIG_HDR_STYLE);
+  for(var orr=0;orr<CTX.data.length;orr++){
+    var srcRow=CTX.data[orr];
+    for(var oc=0;oc<origLen;oc++)writeOrigCell(wsO,orr+1,oc,oc<srcRow.length?srcRow[oc]:'',null);}
+  expandRange(wsO,CTX.data.length,origLen-1);
+  var oW=[];for(var ow=0;ow<origLen;ow++)oW.push({wch:Math.max(String(origH[ow]||'').length+2,14)});
+  wsO['!cols']=oW;
+  XLSX.utils.book_append_sheet(wb,wsO,'Original');
+
+  /* ================= SHEET 2: PO Sheet ================= */
   var rrpSrcCol=-1;
   for(var h=0;h<origH.length;h++){var hl=origH[h].toLowerCase();if(hl.indexOf('rrp')>=0||hl.indexOf('msrp')>=0||hl.indexOf('srp')>=0){rrpSrcCol=h;break;}}
   var qtySrcCol=-1;
@@ -1427,104 +1729,128 @@ function downloadExcel(){
     if(styleSrcCol<0&&(hsl.indexOf('style')>=0||hsl==='sku'))styleSrcCol=hs;
     if(colorSrcCol<0&&(hsl.indexOf('colour')>=0||hsl.indexOf('color')>=0))colorSrcCol=hs;}
   var vatDiv=cfg.vat!==1?'/'+cfg.vat:'';
-  var marginMult=(100-ENG.margin)/100;
-  var lastDataRow=R.outRows.length+1;
+  var marginMult=(100-ENGX.margin)/100;
+  var lastDataRow=keptRows.length+1;
 
-  /* ===== Build column layout ===== */
   var extraCols=[];
   var cConcat=origLen+extraCols.length;extraCols.push('CONCAT');
   var cCount=origLen+extraCols.length;extraCols.push('COUNT');
   var cOpts=origLen+extraCols.length;extraCols.push('OPTIONS');
-  var cRrpEx=origLen+extraCols.length;extraCols.push('RRP EX-VAT ('+ENG.cur+')');
-  var cCostEx=origLen+extraCols.length;extraCols.push('COST EX-VAT ('+ENG.cur+')');
+  var cRrpEx=origLen+extraCols.length;extraCols.push('RRP EX-VAT ('+ENGX.cur+')');
+  var cCostEx=origLen+extraCols.length;extraCols.push('COST EX-VAT ('+ENGX.cur+')');
+  var cMargin=origLen+extraCols.length;extraCols.push('MARGIN %');
   var cTotalVal=-1;
-  if(hasQty){cTotalVal=origLen+extraCols.length;extraCols.push('TOTAL VALUE ('+ENG.cur+')');}
-  /* Dummy RRP territory columns */
-  var dummyTerrs=[];
-  var terrColIdx={};
+  if(hasQty){cTotalVal=origLen+extraCols.length;extraCols.push('TOTAL VALUE ('+ENGX.cur+')');}
+  var dummyTerrs=[],terrColIdx={};
   var allTerrs=['UAE','KSA','KWT','QAT'];
-  for(var ti=0;ti<allTerrs.length;ti++){
-    if(allTerrs[ti]!==ENG.terr){dummyTerrs.push(allTerrs[ti]);
-      terrColIdx[allTerrs[ti]]=origLen+extraCols.length;extraCols.push('DUMMY RRP '+allTerrs[ti]);}}
-  /* PID columns */
+  if(ENGX.dummyRRP!==false){
+    for(var ti=0;ti<allTerrs.length;ti++){
+      if(allTerrs[ti]!==ENGX.terr){dummyTerrs.push(allTerrs[ti]);
+        terrColIdx[allTerrs[ti]]=origLen+extraCols.length;extraCols.push('DUMMY RRP '+allTerrs[ti]);}}}
   var cType=-1,cPidSrc=-1;
-  if(R.hasBarcode){cType=origLen+extraCols.length;extraCols.push('TYPE');cPidSrc=origLen+extraCols.length;extraCols.push('PID SOURCE');}
+  if(CTX.hasBarcode){cType=origLen+extraCols.length;extraCols.push('TYPE');cPidSrc=origLen+extraCols.length;extraCols.push('PID SOURCE');}
 
   var hdr=origH.slice().concat(extraCols);
   var totalCols=hdr.length;
   var ws={};
-
-  /* ===== Write header row with color ===== */
   for(var hi=0;hi<hdr.length;hi++)setCell(ws,0,hi,hdr[hi],false,HDR_STYLE);
 
-  /* ===== Data rows ===== */
-  for(var ri=0;ri<R.outRows.length;ri++){
-    var rw=R.outRows[ri];var exRow=ri+2;var wsRow=ri+1;
-    /* Original columns */
-    for(var oi=0;oi<origLen;oi++){var ov=oi<rw.orig.length?rw.orig[oi]:'';var nv=parseFloat(ov);
-      setCell(ws,wsRow,oi,(!isNaN(nv)&&ov!==''&&String(nv)===String(ov).trim())?nv:ov,false,null);}
-    /* CONCAT formula: =A2&B2 */
+  for(var ri=0;ri<keptRows.length;ri++){
+    var rw=keptRows[ri];var exRow=ri+2;var wsRow=ri+1;
+    for(var oi=0;oi<origLen;oi++)writeOrigCell(ws,wsRow,oi,oi<rw.orig.length?rw.orig[oi]:'',null);
     if(styleSrcCol>=0&&colorSrcCol>=0)setCell(ws,wsRow,cConcat,colL(styleSrcCol)+exRow+'&'+colL(colorSrcCol)+exRow,true,CALC_STYLE);
     else setCell(ws,wsRow,cConcat,rw.concat,false,CALC_STYLE);
-    /* COUNT formula: =COUNTIF(concat_range, this_concat) */
     setCell(ws,wsRow,cCount,'COUNTIF('+colL(cConcat)+'$2:'+colL(cConcat)+'$'+lastDataRow+','+colL(cConcat)+exRow+')',true,CALC_STYLE);
-    /* OPTIONS formula: =IF(COUNTIF(concat$1:concat_this, concat_this)=1,1,0) — 1 for first occurrence */
     setCell(ws,wsRow,cOpts,'IF(COUNTIF('+colL(cConcat)+'$2:'+colL(cConcat)+exRow+','+colL(cConcat)+exRow+')=1,1,0)',true,CALC_STYLE);
-    /* RRP EX-VAT formula: =source_rrp / vat */
     if(rrpSrcCol>=0)setCell(ws,wsRow,cRrpEx,colL(rrpSrcCol)+exRow+(vatDiv||''),true,CALC_STYLE);
     else setCell(ws,wsRow,cRrpEx,rw.rrpEx,false,CALC_STYLE);
-    /* COST EX-VAT formula: =rrp_ex * margin_mult */
     setCell(ws,wsRow,cCostEx,colL(cRrpEx)+exRow+'*'+marginMult,true,CALC_STYLE);
-    /* TOTAL VALUE formula: =cost * qty */
+    /* margin shown per line, derived from the two columns beside it rather than
+       hardcoded, so if someone edits a cost the margin follows */
+    setCell(ws,wsRow,cMargin,'IF('+colL(cRrpEx)+exRow+'=0,"",ROUND((1-'+colL(cCostEx)+exRow+'/'+colL(cRrpEx)+exRow+')*100,1))',true,
+      {fill:CALC_STYLE.fill,numFmt:'0.0'});
     if(hasQty){
       if(qtySrcCol>=0)setCell(ws,wsRow,cTotalVal,colL(cCostEx)+exRow+'*'+colL(qtySrcCol)+exRow,true,CALC_STYLE);
       else setCell(ws,wsRow,cTotalVal,rw.totalVal||0,false,CALC_STYLE);}
-    /* DUMMY RRP territory formulas */
-    var rrpRef=colL(cRrpEx)+exRow;
+    var rrpRef=(rrpSrcCol>=0?colL(rrpSrcCol):colL(cRrpEx))+exRow;
     for(var di=0;di<dummyTerrs.length;di++){var dt=dummyTerrs[di];var dtCol=terrColIdx[dt];
-      var formula='';
-      if(dt==='KSA')formula=rrpRef+'/1.05*1.15';
-      else if(dt==='KWT')formula=rrpRef+'*0.084';
-      else if(dt==='QAT')formula=rrpRef;
-      else if(dt==='UAE')formula=rrpRef;
-      if(formula)setCell(ws,wsRow,dtCol,formula,true,TERR_STYLE);
-      else setCell(ws,wsRow,dtCol,0,false,TERR_STYLE);}
-    /* TYPE + PID SOURCE */
-    if(R.hasBarcode){setCell(ws,wsRow,cType,rw.itemType||'',false,null);setCell(ws,wsRow,cPidSrc,rw.pidSource||'',false,null);}}
+      var rule=DUMMY_RULES[dt];
+      if(!rule){setCell(ws,wsRow,dtCol,0,false,TERR_STYLE);continue;}
+      setCell(ws,wsRow,dtCol,'ROUND('+rrpRef+rule.expr+','+rule.dp+')',true,
+        {fill:TERR_STYLE.fill,numFmt:(rule.dp===0?'0':'0.00')});}
+    if(CTX.hasBarcode){setCell(ws,wsRow,cType,rw.itemType||'',false,null);setCell(ws,wsRow,cPidSrc,rw.pidSource||'',false,null);}}
 
-  expandRange(ws,R.outRows.length,totalCols-1);
-  var colWidths=[];for(var wi=0;wi<totalCols;wi++)colWidths.push({wch:Math.max(hdr[wi].length+2,14)});
+  expandRange(ws,keptRows.length,totalCols-1);
+  var colWidths=[];for(var wi=0;wi<totalCols;wi++)colWidths.push({wch:Math.max(String(hdr[wi]||'').length+2,14)});
   ws['!cols']=colWidths;
-  XLSX.utils.book_append_sheet(wb,ws,'Sheet1');
+  XLSX.utils.book_append_sheet(wb,ws,'PO Sheet');
 
-  /* ===== SHEET 2: Summary ===== */
+  /* ================= SHEET 3: Summary ================= */
+  var PO="'PO Sheet'!";
   var ws2={};
   var SUM_LABEL_STYLE={font:{bold:true,color:{rgb:'FFFFFF'}},fill:{fgColor:{rgb:'1F3864'}}};
   var SUM_VAL_STYLE={fill:{fgColor:{rgb:'E2EFDA'}}};
-  var sumLabels=['Region','Options','Quantity','Total Value','APP Import Currency','APP','PO Creation Entity','Delivery Country','Vendor Name','Delivery WH Location','Item Classification','ROW No','PO Request Date','Currency','Territory'];
+  var sumLabels=['Region','Options','Quantity','Total Value','APP Import Currency','APP','PO Creation Entity','Delivery Country','Vendor Name','Delivery WH Location','Item Classification','ROW No','PO Request Date','Currency','Territory','Rows in PO Sheet','Rows Dropped','Rows in Original'];
   for(var si=0;si<sumLabels.length;si++)setCell(ws2,si,0,sumLabels[si],false,SUM_LABEL_STYLE);
-  setCell(ws2,0,1,ENG.terr+' - '+ENG.type.toUpperCase(),false,SUM_VAL_STYLE);
-  setCell(ws2,1,1,'SUMPRODUCT((Sheet1!'+colL(cOpts)+'2:'+colL(cOpts)+lastDataRow+'>0)*1)',true,SUM_VAL_STYLE);
-  if(hasQty&&qtySrcCol>=0)setCell(ws2,2,1,'SUM(Sheet1!'+colL(qtySrcCol)+'2:'+colL(qtySrcCol)+lastDataRow+')',true,SUM_VAL_STYLE);
-  else setCell(ws2,2,1,hasQty?R.totalQty:'',false,SUM_VAL_STYLE);
-  if(hasQty&&cTotalVal>=0)setCell(ws2,3,1,'SUM(Sheet1!'+colL(cTotalVal)+'2:'+colL(cTotalVal)+lastDataRow+')',true,SUM_VAL_STYLE);
+  setCell(ws2,0,1,ENGX.terr+' - '+ENGX.type.toUpperCase(),false,SUM_VAL_STYLE);
+  if(keptRows.length)setCell(ws2,1,1,'SUMPRODUCT(('+PO+colL(cOpts)+'2:'+colL(cOpts)+lastDataRow+'>0)*1)',true,SUM_VAL_STYLE);
+  else setCell(ws2,1,1,0,false,SUM_VAL_STYLE);
+  if(hasQty&&qtySrcCol>=0&&keptRows.length)setCell(ws2,2,1,'SUM('+PO+colL(qtySrcCol)+'2:'+colL(qtySrcCol)+lastDataRow+')',true,SUM_VAL_STYLE);
+  else setCell(ws2,2,1,hasQty?0:'',false,SUM_VAL_STYLE);
+  if(hasQty&&cTotalVal>=0&&keptRows.length)setCell(ws2,3,1,'SUM('+PO+colL(cTotalVal)+'2:'+colL(cTotalVal)+lastDataRow+')',true,SUM_VAL_STYLE);
   else setCell(ws2,3,1,'',false,SUM_VAL_STYLE);
-  setCell(ws2,4,1,ENG.cur,false,SUM_VAL_STYLE);
+  setCell(ws2,4,1,ENGX.cur,false,SUM_VAL_STYLE);
   if(hasQty)setCell(ws2,5,1,'IF(B3=0,"",B4/B3)',true,SUM_VAL_STYLE);else setCell(ws2,5,1,'',false,SUM_VAL_STYLE);
-  setCell(ws2,6,1,cfg.entity,false,SUM_VAL_STYLE);setCell(ws2,7,1,ENG.terr,false,SUM_VAL_STYLE);
-  setCell(ws2,8,1,ENG.vname,false,SUM_VAL_STYLE);setCell(ws2,9,1,ENG.terr,false,SUM_VAL_STYLE);
-  for(var sv2=10;sv2<sumLabels.length;sv2++)setCell(ws2,sv2,1,'',false,SUM_VAL_STYLE);
+  setCell(ws2,6,1,cfg.entity,false,SUM_VAL_STYLE);setCell(ws2,7,1,ENGX.terr,false,SUM_VAL_STYLE);
+  setCell(ws2,8,1,ENGX.vname,false,SUM_VAL_STYLE);setCell(ws2,9,1,ENGX.terr,false,SUM_VAL_STYLE);
+  for(var sv2=10;sv2<14;sv2++)setCell(ws2,sv2,1,'',false,SUM_VAL_STYLE);
+  setCell(ws2,13,1,ENGX.cur,false,SUM_VAL_STYLE);
+  setCell(ws2,14,1,ENGX.terr,false,SUM_VAL_STYLE);
+  setCell(ws2,15,1,keptRows.length,false,SUM_VAL_STYLE);
+  setCell(ws2,16,1,D.dropped.length,false,SUM_VAL_STYLE);
+  setCell(ws2,17,1,(CTX.kept.length+CTX.dropped.length),false,SUM_VAL_STYLE);
   expandRange(ws2,sumLabels.length-1,1);
-  ws2['!cols']=[{wch:22},{wch:30}];
+  ws2['!cols']=[{wch:24},{wch:32}];
   XLSX.utils.book_append_sheet(wb,ws2,'Summary');
+
+  /* ================= SHEET 4: Dropped ================= */
+  var ws3={};
+  var dHdr=origH.slice().concat(['SIZE COUNT','TYPE','PID SOURCE','DROP REASON']);
+  for(var dh=0;dh<dHdr.length;dh++)setCell(ws3,0,dh,dHdr[dh],false,DROP_HDR_STYLE);
+  if(D.dropped.length){
+    for(var dr=0;dr<D.dropped.length;dr++){
+      var drw=D.dropped[dr];var dRow=dr+1;
+      for(var dc=0;dc<origLen;dc++)writeOrigCell(ws3,dRow,dc,dc<drw.orig.length?drw.orig[dc]:'',null);
+      setCell(ws3,dRow,origLen,drw._count,false,DROP_CELL);
+      setCell(ws3,dRow,origLen+1,drw.itemType||'',false,DROP_CELL);
+      setCell(ws3,dRow,origLen+2,drw.pidSource||'',false,DROP_CELL);
+      setCell(ws3,dRow,origLen+3,drw._reasons.join('; '),false,DROP_CELL);}
+    expandRange(ws3,D.dropped.length,dHdr.length-1);
+  }else{
+    setCell(ws3,1,0,'Nothing dropped - every New line met the minimum size count and none were kids clothing.',false,null);
+    expandRange(ws3,1,dHdr.length-1);}
+  var dW=[];for(var dwi=0;dwi<dHdr.length;dwi++)dW.push({wch:Math.max(String(dHdr[dwi]||'').length+2,14)});
+  dW[dHdr.length-1]={wch:46};
+  ws3['!cols']=dW;
+  XLSX.utils.book_append_sheet(wb,ws3,'Dropped');
 
   /* ===== Download ===== */
   var wbout=XLSX.write(wb,{bookType:'xlsx',type:'binary',cellFormula:true});
   function s2ab(s){var buf=new ArrayBuffer(s.length);var view=new Uint8Array(buf);for(var i=0;i<s.length;i++)view[i]=s.charCodeAt(i)&0xFF;return buf;}
   var blob=new Blob([s2ab(wbout)],{type:'application/octet-stream'});
-  var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='PO_'+ENG.type+'_'+ENG.terr+'_'+ENG.vname.replace(/\s+/g,'_')+'.xlsx';a.click();
+  var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=(poNumber?String(poNumber):'PO_'+ENGX.type+'_'+ENGX.terr+'_'+String(ENGX.vname||'vendor').replace(/\s+/g,'_'))+'.xlsx';a.click();
   setTimeout(function(){URL.revokeObjectURL(a.href);},1000);
-  toast('Excel downloaded');logA('Downloaded Excel','Engine',ENG.vname);}
+  toast('Excel downloaded \u2014 '+keptRows.length+' rows in PO Sheet, '+D.dropped.length+' dropped');}
+
+/* Any unexpected failure inside the Excel build should tell the user and still
+   give them their data, rather than a button that appears to do nothing. */
+var _dlExcelInner=downloadExcel;
+downloadExcel=function(){
+  try{_dlExcelInner();}
+  catch(e){
+    toast('Excel build failed: '+(e&&e.message?e.message:'unknown')+' \u2014 downloading CSV instead',true);
+    try{downloadCSVFallback();}catch(e2){toast('CSV fallback also failed: '+e2.message,true);}}};
+window.downloadExcel=downloadExcel;
 
 function pad2(n){return n<10?'0'+n:''+n;}
 function genTrackingId(type,brand,territory){
@@ -1555,12 +1881,409 @@ function createPOFromEngine(){
     qc:{log:[],owner:'',status:'Pending',approval:'',comments:'',dropReason:'',dropOther:'',delayed:'',delayReason:'',delayOther:'',delayNote:'',delayImages:[],lastUpdated:''},
     itemCreation:{comments:[],status:''},extra:{},createdDate:new Date().toISOString().slice(0,10),
     pidBreakdown:R.hasBarcode?{newCount:R.newC,replCount:R.replC,unkCount:R.unkC}:null,
-    totalOptions:R.totalOpts,totalQty:R.hasQty?R.totalQty:0,app:R.app||0,terrPricing:terrPricing};
+    totalOptions:R.totalOpts,totalQty:R.hasQty?R.totalQty:0,app:R.app||0,terrPricing:terrPricing,
+    sheet:buildSheetSnapshot(R)};
   DB.pos.unshift(po);sv();logA('Created PO','Engine',po.trackingId);
   sendNotification('planning','New PO Request &middot; '+po.poNumber,
     'A new PO request has been submitted and is awaiting Planning approval.\n\nPO Number: '+po.poNumber+'\nSupplier: '+po.supplier+'\nBrand: '+po.brand+'\nType: '+po.type+'\nTerritory: '+po.territory+'\nValue: '+po.currency+' '+(po.value||0).toLocaleString());
   ENG.step=1;ENG.result=null;toast('PO created: '+po.trackingId);
   setTimeout(function(){go(ENG.type==='Marketplace'?'marketplace':'consignment');},600);}
+
+/* ===== PO SHEET SNAPSHOT =====
+   Planning and Operations need to review the same sheet the buyer processed, so
+   the processed rows are stored on the PO record itself rather than left in the
+   buyer's browser memory. Everything downstream - the in-dashboard viewer, the
+   checks panel, and the Excel download from any role - reads from this snapshot,
+   which means all three roles are always looking at identical numbers.
+
+   Rows are capped: the whole dataset syncs as one JSON blob, and an uncapped
+   4,000-line sheet per PO would blow the storage budget. Beyond the cap the
+   aggregates stay exact and the viewer says it is showing a subset. */
+var SHEET_ROW_CAP=1200;
+
+function buildSheetSnapshot(R){
+  var D=computeDrops(R);
+  function packRow(rw){
+    return {o:rw.orig,c:rw.concat,n:rw._count||0,
+      re:+(rw.rrpEx||0).toFixed(4),ce:+(rw.costEx||0).toFixed(4),
+      q:rw.qty==null?null:rw.qty,tv:rw.totalVal==null?null:+(rw.totalVal||0).toFixed(2),
+      t:rw.itemType||'',ps:rw.pidSource||'',bc:rw.barcode||'',
+      rs:(rw._reasons&&rw._reasons.length)?rw._reasons:null,
+      kn:rw._kidsNote||null};}
+  var keptOut=[],dropOut=[],i;
+  for(i=0;i<D.kept.length&&i<SHEET_ROW_CAP;i++)keptOut.push(packRow(D.kept[i]));
+  for(i=0;i<D.dropped.length&&i<SHEET_ROW_CAP;i++)dropOut.push(packRow(D.dropped[i]));
+  var origOut=[];
+  for(i=0;i<R.data.length&&i<SHEET_ROW_CAP;i++)origOut.push(R.data[i]);
+  return {
+    headers:R.headers.slice(),
+    original:origOut,
+    kept:keptOut,
+    dropped:dropOut,
+    counts:{kept:D.kept.length,dropped:D.dropped.length,original:R.data.length,
+      lowCount:D.lowCount,kids:D.kidsCount,kidsKept:D.kidsFootwearKept,ambiguous:D.ambiguous},
+    catCols:D.kidsColName||'',
+    truncated:(D.kept.length>SHEET_ROW_CAP||D.dropped.length>SHEET_ROW_CAP||R.data.length>SHEET_ROW_CAP),
+    cfg:{vat:R.cfg.vat,entity:R.cfg.entity},
+    hasQty:!!R.hasQty,hasBarcode:!!R.hasBarcode,
+    dummyRRP:ENG.dummyRRP!==false,
+    cur:ENG.cur,margin:ENG.margin,terr:ENG.terr,type:ENG.type,
+    vname:ENG.vname,dept:ENG.dept||'',
+    totals:{options:R.totalOpts,qty:R.hasQty?R.totalQty:0,value:R.totalValue||0,app:R.app||0,
+      newC:R.newC||0,replC:R.replC||0,unkC:R.unkC||0}};}
+
+/* Rebuild the shape downloadExcel expects from a stored snapshot, so any role
+   can regenerate the identical workbook without the engine being loaded. */
+function ctxFromSnapshot(sn){
+  function unpack(r){
+    return {orig:r.o,concat:r.c,_count:r.n,rrpEx:r.re,costEx:r.ce,qty:r.q,totalVal:r.tv,
+      itemType:r.t,pidSource:r.ps,barcode:r.bc,_reasons:r.rs||[],_kidsNote:r.kn||'',
+      opt:0,terrRRP:{},terrOv:{}};}
+  return {
+    headers:sn.headers,data:sn.original,
+    kept:sn.kept.map(unpack),dropped:sn.dropped.map(unpack),
+    cfg:sn.cfg,hasQty:sn.hasQty,hasBarcode:sn.hasBarcode,
+    cur:sn.cur,margin:sn.margin,terr:sn.terr,type:sn.type,vname:sn.vname,dept:sn.dept,
+    dummyRRP:sn.dummyRRP,totals:sn.totals,counts:sn.counts};}
+
+/* ===== REVIEW CHECKS =====
+   Surfaces the things a planner would otherwise have to open the file to see. */
+function reviewChecks(sn){
+  var out=[],i,rw;
+  var all=sn.kept.concat(sn.dropped);
+  var cur=sn.cur||'';
+
+  /* --- RRP check --- */
+  var zero=0,belowCost=0,minR=null,maxR=null;
+  for(i=0;i<all.length;i++){
+    rw=all[i];
+    var rrp=Number(rw.re)||0;
+    if(rrp<=0)zero++;
+    if(rrp>0&&Number(rw.ce)>rrp)belowCost++;
+    if(rrp>0){if(minR===null||rrp<minR)minR=rrp;if(maxR===null||rrp>maxR)maxR=rrp;}}
+  if(zero)out.push({level:'bad',label:'RRP missing or zero',
+    detail:zero+' of '+all.length+' rows have no usable RRP. Those lines will price at zero cost.'});
+  else out.push({level:'ok',label:'RRP present on every row',
+    detail:'Range '+cur+' '+(minR!=null?minR.toFixed(2):'0')+' to '+cur+' '+(maxR!=null?maxR.toFixed(2):'0')+' ex-VAT.'});
+  if(belowCost)out.push({level:'bad',label:'Cost exceeds RRP',
+    detail:belowCost+' row'+(belowCost!==1?'s':'')+' would be bought above their retail price. Check the margin.'});
+
+  /* --- margin check --- */
+  var mg=Number(sn.margin)||0;
+  if(mg<=0)out.push({level:'bad',label:'Margin not set',detail:'Margin is '+mg+'%, so cost equals RRP ex-VAT.'});
+  else if(mg<15)out.push({level:'warn',label:'Margin unusually low',detail:mg+'% - confirm this is intended before approving.'});
+  else if(mg>70)out.push({level:'warn',label:'Margin unusually high',detail:mg+'% - confirm the vendor has agreed this.'});
+  else out.push({level:'ok',label:'Margin '+mg+'%',detail:'Cost is '+(100-mg)+'% of RRP ex-VAT.'});
+
+  /* --- new vs replenishment mapping --- */
+  var t=sn.totals||{};
+  var mapped=(t.newC||0)+(t.replC||0);
+  if(!sn.hasBarcode)out.push({level:'bad',label:'New / Replenishment not mapped',
+    detail:'No barcode column was found in the vendor sheet, so no line could be checked against the PID master.'});
+  else if(t.unkC)out.push({level:'warn',label:'Partially mapped',
+    detail:(t.newC||0)+' New, '+(t.replC||0)+' Replenishment, '+t.unkC+' with a barcode that matched nothing. Confirm the PID dump was current.'});
+  else if(mapped)out.push({level:'ok',label:'New / Replenishment mapped',
+    detail:(t.newC||0)+' New and '+(t.replC||0)+' Replenishment, every line matched.'});
+
+  /* --- drops --- */
+  var cts=sn.counts||{};
+  if(cts.dropped)out.push({level:'warn',label:cts.dropped+' row'+(cts.dropped!==1?'s':'')+' dropped',
+    detail:(cts.lowCount?cts.lowCount+' below the '+DROP_MIN_COUNT+'-size minimum. ':'')+
+      (cts.kids?cts.kids+' kids clothing. ':'')+
+      (cts.kidsKept?cts.kidsKept+' kids non-clothing kept. ':'')+
+      (cts.ambiguous?cts.ambiguous+' kids but category unclear, kept. ':'')+
+      'Replenishment lines are never dropped.'});
+  else out.push({level:'ok',label:'Nothing dropped',detail:'Every New line met the size minimum and none were kids clothing.'});
+
+  /* --- option integrity --- */
+  if(cts.kept===0)out.push({level:'bad',label:'PO sheet is empty',detail:'Every row was dropped. There is nothing to raise.'});
+  return out;}
+
+/* ===== SHARED SUMMARY BLOCK (buyer, planning, operations) ===== */
+function summaryTableHTML(sn){
+  function fmt(n){return n==null?'&mdash;':parseFloat(n).toLocaleString(undefined,{maximumFractionDigits:2,minimumFractionDigits:2});}
+  var t=sn.totals||{},cts=sn.counts||{};
+  var hasQty=sn.hasQty;
+  var region=sn.terr+' - '+String(sn.type||'').toUpperCase();
+  var rows=[['Region',region,'stat'],['Options',t.options,'auto'],
+    ['Quantity',hasQty?Number(t.qty||0).toLocaleString():'<i style="color:var(--muted)">MP &mdash; leave blank</i>',hasQty?'auto':''],
+    ['Total Value',hasQty?fmt(t.value)+' '+sn.cur:'<i style="color:var(--muted)">MP &mdash; leave blank</i>',hasQty?'auto':''],
+    ['APP Import Currency',sn.cur,'stat'],
+    ['APP',hasQty?fmt(t.app):'<i style="color:var(--muted)">MP &mdash; leave blank</i>',hasQty?'auto':''],
+    ['Margin %',sn.margin+'%','auto'],
+    ['PO Creation Entity',(sn.cfg&&sn.cfg.entity)||'','stat'],
+    ['Delivery Country',sn.terr,'stat'],['Vendor Name',sn.vname,''],
+    ['Delivery WH Location',sn.terr,'stat'],
+    ['Rows in PO Sheet',cts.kept,'auto'],['Rows Dropped',cts.dropped,cts.dropped?'stat':''],
+    ['Rows in Original',cts.original,''],
+    ['Currency',sn.cur,'stat'],['Territory',sn.terr,'stat']];
+  var h='';
+  for(var i=0;i<rows.length;i++)h+='<tr><td class="lbl">'+rows[i][0]+'</td><td class="'+(rows[i][2]||'')+'">'+(rows[i][1]==null?'&mdash;':rows[i][1])+'</td></tr>';
+  return '<table class="sumtable">'+h+'</table>';}
+
+function checksHTML(sn){
+  var ck=reviewChecks(sn);
+  var col={ok:'var(--grn)',warn:'var(--yel)',bad:'var(--red)'};
+  var icon={ok:'&#10003;',warn:'&#9888;',bad:'&#10005;'};
+  var h='';
+  for(var i=0;i<ck.length;i++){
+    h+='<div style="display:flex;gap:9px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--bdr)">'+
+      '<span style="color:'+col[ck[i].level]+';font-weight:800;flex-shrink:0">'+icon[ck[i].level]+'</span>'+
+      '<div style="min-width:0"><b style="font-size:12px">'+ck[i].label+'</b>'+
+      '<div style="font-size:11px;color:var(--muted);line-height:1.5;margin-top:2px">'+ck[i].detail+'</div></div></div>';}
+  return h;}
+
+function pidSplitHTML(sn){
+  var t=sn.totals||{};
+  var tot=(t.newC||0)+(t.replC||0)+(t.unkC||0);
+  if(!tot)return '<div style="font-size:12px;color:var(--muted)">No barcode check ran on this sheet.</div>';
+  function pc(n){return tot?Math.round(n/tot*100):0;}
+  var segs=[['New',t.newC||0,'var(--acc)'],['Replenishment',t.replC||0,'var(--grn)'],['Unmatched',t.unkC||0,'var(--grey)']];
+  var bar='',leg='';
+  for(var i=0;i<segs.length;i++){
+    if(segs[i][1]>0)bar+='<div style="width:'+pc(segs[i][1])+'%;background:'+segs[i][2]+';height:100%"></div>';
+    leg+='<span style="display:inline-flex;align-items:center;gap:5px;margin-right:14px;font-size:12px;color:var(--muted)">'+
+      '<span style="width:9px;height:9px;border-radius:2px;background:'+segs[i][2]+';display:inline-block"></span>'+
+      segs[i][0]+': <b style="color:var(--txt)">'+segs[i][1]+'</b> ('+pc(segs[i][1])+'%)</span>';}
+  return '<div style="display:flex;width:100%;height:13px;border-radius:7px;overflow:hidden;background:var(--surf2);margin-bottom:8px">'+bar+'</div><div>'+leg+'</div>';}
+
+/* ===== IN-DASHBOARD SHEET VIEWER =====
+   Opens the same four tabs the Excel file would have, so a reviewer never has to
+   download anything to make a decision. */
+var SHEET_VIEW_ROWS=250;
+
+/* Rebuilds the EXACT column layout the Excel writer produces, so a cell
+   reference shown in the viewer (K7, L7...) is the same reference the planner
+   would find after opening the downloaded file. Kept in one place so the two
+   can never drift apart. */
+function viewerColumns(sn){
+  function L(c){var s='';c++;while(c>0){c--;s=String.fromCharCode(65+(c%26))+s;c=Math.floor(c/26);}return s;}
+  var h=sn.headers,origLen=h.length,cols=[],i;
+  for(i=0;i<origLen;i++)cols.push({label:h[i],kind:'orig',idx:i});
+  function add(label,kind){cols.push({label:label,kind:kind,idx:cols.length});return cols.length-1;}
+  var cConcat=add('CONCAT','concat');
+  var cCount=add('COUNT','count');
+  var cOpts=add('OPTIONS','options');
+  var cRrpEx=add('RRP EX-VAT ('+sn.cur+')','rrpex');
+  var cCostEx=add('COST EX-VAT ('+sn.cur+')','costex');
+  var cMargin=add('MARGIN %','margin');
+  var cTotal=sn.hasQty?add('TOTAL VALUE ('+sn.cur+')','total'):-1;
+  var dummies=[];
+  if(sn.dummyRRP){
+    var all=['UAE','KSA','KWT','QAT'];
+    for(i=0;i<all.length;i++)if(all[i]!==sn.terr)dummies.push({terr:all[i],idx:add('DUMMY RRP '+all[i],'dummy')});}
+  var cType=-1,cPid=-1;
+  if(sn.hasBarcode){cType=add('TYPE','type');cPid=add('PID SOURCE','pidsrc');}
+
+  /* same source-column detection the writer uses */
+  var rrpSrc=-1,qtySrc=-1,styleSrc=-1,colorSrc=-1;
+  for(i=0;i<origLen;i++){
+    var hl=String(h[i]||'').toLowerCase();
+    if(rrpSrc<0&&(hl.indexOf('rrp')>=0||hl.indexOf('msrp')>=0||hl.indexOf('srp')>=0))rrpSrc=i;
+    if(sn.hasQty&&qtySrc<0&&(hl.indexOf('qty')>=0||hl.indexOf('quantity')>=0))qtySrc=i;
+    if(styleSrc<0&&(hl.indexOf('style')>=0||hl==='sku'))styleSrc=i;
+    if(colorSrc<0&&(hl.indexOf('colour')>=0||hl.indexOf('color')>=0))colorSrc=i;}
+  return {L:L,cols:cols,origLen:origLen,cConcat:cConcat,cCount:cCount,cOpts:cOpts,
+    cRrpEx:cRrpEx,cCostEx:cCostEx,cMargin:cMargin,cTotal:cTotal,dummies:dummies,
+    cType:cType,cPid:cPid,rrpSrc:rrpSrc,qtySrc:qtySrc,styleSrc:styleSrc,colorSrc:colorSrc};}
+
+/* Formula text for one calculated cell - mirrors the writer exactly. */
+function viewerFormula(sn,V,kind,exRow,lastRow,dummyTerr){
+  var L=V.L;
+  var vatDiv=(sn.cfg&&sn.cfg.vat&&sn.cfg.vat!==1)?'/'+sn.cfg.vat:'';
+  var marginMult=(100-Number(sn.margin||0))/100;
+  var rrpRef=(V.rrpSrc>=0?L(V.rrpSrc):L(V.cRrpEx))+exRow;
+  switch(kind){
+    case 'concat':
+      return (V.styleSrc>=0&&V.colorSrc>=0)?'='+L(V.styleSrc)+exRow+'&'+L(V.colorSrc)+exRow:null;
+    case 'count':
+      return '=COUNTIF('+L(V.cConcat)+'$2:'+L(V.cConcat)+'$'+lastRow+','+L(V.cConcat)+exRow+')';
+    case 'options':
+      return '=IF(COUNTIF('+L(V.cConcat)+'$2:'+L(V.cConcat)+exRow+','+L(V.cConcat)+exRow+')=1,1,0)';
+    case 'rrpex':
+      return V.rrpSrc>=0?'='+L(V.rrpSrc)+exRow+vatDiv:null;
+    case 'costex':
+      return '='+L(V.cRrpEx)+exRow+'*'+marginMult;
+    case 'margin':
+      return '=IF('+L(V.cRrpEx)+exRow+'=0,"",ROUND((1-'+L(V.cCostEx)+exRow+'/'+L(V.cRrpEx)+exRow+')*100,1))';
+    case 'total':
+      return V.qtySrc>=0?'='+L(V.cCostEx)+exRow+'*'+L(V.qtySrc)+exRow:null;
+    case 'dummy':
+      var rule=DUMMY_RULES[dummyTerr];
+      return rule?'=ROUND('+rrpRef+rule.expr+','+rule.dp+')':null;
+    default:return null;}}
+
+function sheetViewerModal(po,opts){
+  opts=opts||{};
+  var sn=po.sheet;
+  if(!sn){toast('No sheet stored for this PO',true);return;}
+  var V=viewerColumns(sn);
+  var showAllFormulas=false;
+  var m=el('div','modal');m.style.maxWidth='1180px';
+  m.innerHTML='<div class="mh"><h3>&#128202; '+po.poNumber+' &middot; '+po.supplier+' &middot; '+po.brand+'</h3>'+
+      '<button class="ib" id="svX">&#10005;</button></div>'+
+    '<div class="mb" style="max-height:74vh">'+
+      '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">'+
+        '<div class="dtabs" id="svTabs" style="display:inline-flex">'+
+          '<button class="dtab on" data-t="po">PO Sheet ('+sn.counts.kept+')</button>'+
+          '<button class="dtab" data-t="summary">Summary</button>'+
+          '<button class="dtab" data-t="dropped">Dropped ('+sn.counts.dropped+')</button>'+
+          '<button class="dtab" data-t="original">Original ('+sn.counts.original+')</button>'+
+        '</div>'+
+        '<label id="svFxWrap" style="display:flex;align-items:center;gap:6px;font-size:12px;font-weight:700;cursor:pointer;margin-left:auto">'+
+          '<input type="checkbox" id="svFxAll" style="width:15px;height:15px"> Show all formulas</label>'+
+      '</div>'+
+      /* formula bar, styled like a spreadsheet */
+      '<div id="svBar" class="fxbar"><span class="fxref" id="svRef">&mdash;</span>'+
+        '<span class="fxfx">fx</span>'+
+        '<span class="fxval" id="svVal">Click any cell to inspect it</span></div>'+
+      (sn.truncated?'<div style="padding:8px 11px;background:rgba(232,112,58,.09);border:1px solid rgba(232,112,58,.3);border-radius:8px;font-size:11px;color:var(--acc);margin-bottom:10px">&#9888; Large sheet &mdash; the viewer holds the first '+SHEET_ROW_CAP+' rows per tab. Totals are for the whole file; download the Excel for every row.</div>':'')+
+      '<div id="svBody"></div>'+
+    '</div>'+
+    '<div class="mf" id="svFoot"></div>';
+  openM(m);
+  $('#svX').onclick=closeM;
+
+  function setBar(ref,formula,value){
+    $('#svRef').textContent=ref||'\u2014';
+    var v=$('#svVal');
+    if(formula){v.innerHTML='<b style="color:var(--pri2)">'+String(formula).replace(/[&<>]/g,function(x){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[x];})+'</b>'+
+      (value!=null&&value!==''?'<span style="color:var(--muted)"> &nbsp;&rarr;&nbsp; '+value+'</span>':'');}
+    else v.innerHTML=(value==null||value==='')?'<span style="color:var(--muted)">(empty)</span>':String(value);}
+
+  function poTable(){
+    var lastRow=sn.kept.length+1;
+    var lim=Math.min(SHEET_VIEW_ROWS,sn.kept.length);
+    var th='<thead><tr><th class="rowno"></th>';
+    for(var c=0;c<V.cols.length;c++){
+      var isCalc=V.cols[c].kind!=='orig';
+      th+='<th'+(isCalc?' style="background:rgba(68,114,196,.14)"':'')+'>'+
+        '<span style="color:var(--muted);font-weight:800">'+V.L(c)+'</span> '+V.cols[c].label+'</th>';}
+    th+='</tr></thead><tbody>';
+    for(var r=0;r<lim;r++){
+      var rw=sn.kept[r];var exRow=r+2;
+      th+='<tr><td class="rowno">'+exRow+'</td>';
+      for(var ci=0;ci<V.cols.length;ci++){
+        var col=V.cols[ci];var val='',f=null;
+        if(col.kind==='orig'){val=rw.o[col.idx];if(val==null)val='';}
+        else if(col.kind==='concat'){val=rw.c;f=viewerFormula(sn,V,'concat',exRow,lastRow);}
+        else if(col.kind==='count'){val=rw.n;f=viewerFormula(sn,V,'count',exRow,lastRow);}
+        else if(col.kind==='options'){val='';f=viewerFormula(sn,V,'options',exRow,lastRow);}
+        else if(col.kind==='rrpex'){val=Number(rw.re).toFixed(2);f=viewerFormula(sn,V,'rrpex',exRow,lastRow);}
+        else if(col.kind==='costex'){val=Number(rw.ce).toFixed(2);f=viewerFormula(sn,V,'costex',exRow,lastRow);}
+        else if(col.kind==='margin'){val=Number(sn.margin).toFixed(1);f=viewerFormula(sn,V,'margin',exRow,lastRow);}
+        else if(col.kind==='total'){val=rw.tv==null?'':Number(rw.tv).toFixed(2);f=viewerFormula(sn,V,'total',exRow,lastRow);}
+        else if(col.kind==='dummy'){
+          var dm=null;for(var d=0;d<V.dummies.length;d++)if(V.dummies[d].idx===ci)dm=V.dummies[d];
+          var rule=dm?DUMMY_RULES[dm.terr]:null;
+          var base=Number(rw.re)*((sn.cfg&&sn.cfg.vat)||1);
+          var dv=dm?(dm.terr==='KSA'?base/1.05*1.15:dm.terr==='KWT'?base*0.084:base):0;
+          var fac=Math.pow(10,rule?rule.dp:2);
+          val=(Math.round(dv*fac)/fac).toFixed(rule?rule.dp:2);
+          f=dm?viewerFormula(sn,V,'dummy',exRow,lastRow,dm.terr):null;}
+        else if(col.kind==='type'){val=rw.t||'';}
+        else if(col.kind==='pidsrc'){val=rw.ps||'';}
+        var ref=V.L(ci)+exRow;
+        var disp=showAllFormulas&&f?f:(val===''?'<span style="color:var(--grey)">&mdash;</span>':String(val));
+        var cls=f?'cellf':'';
+        th+='<td class="'+cls+'" data-ref="'+ref+'" data-v="'+String(val).replace(/"/g,'&quot;')+'"'+
+          (f?' data-f="'+String(f).replace(/"/g,'&quot;')+'"':'')+'>'+disp+'</td>';}
+      th+='</tr>';}
+    return {html:th+'</tbody>',shown:lim,total:sn.kept.length};}
+
+  function plainTable(rowsSrc,extraCols){
+    var lim=Math.min(SHEET_VIEW_ROWS,rowsSrc.length);
+    var th='<thead><tr><th class="rowno"></th>';
+    for(var c=0;c<sn.headers.length;c++)th+='<th><span style="color:var(--muted);font-weight:800">'+V.L(c)+'</span> '+sn.headers[c]+'</th>';
+    for(var e=0;e<extraCols.length;e++)th+='<th style="background:rgba(192,80,77,.14)">'+extraCols[e]+'</th>';
+    th+='</tr></thead><tbody>';
+    for(var r=0;r<lim;r++){
+      var rw=rowsSrc[r];
+      th+='<tr><td class="rowno">'+(r+2)+'</td>';
+      for(var ci=0;ci<sn.headers.length;ci++){
+        var v=(rw.o?rw.o[ci]:rw[ci]);if(v==null)v='';
+        th+='<td data-ref="'+V.L(ci)+(r+2)+'" data-v="'+String(v).replace(/"/g,'&quot;')+'">'+(v===''?'<span style="color:var(--grey)">&mdash;</span>':String(v))+'</td>';}
+      if(extraCols.length){
+        th+='<td style="text-align:center">'+rw.n+'</td>'+
+          '<td><span class="tag '+(rw.t==='New'?'tg-pend':rw.t==='Replenishment'?'tg-ok':'tg-gr')+'" style="font-size:10px">'+(rw.t||'&mdash;')+'</span></td>'+
+          '<td style="color:var(--red);font-size:11px;white-space:normal;min-width:220px">'+((rw.rs||[]).join('; ')||'&mdash;')+'</td>';}
+      th+='</tr>';}
+    return {html:th+'</tbody>',shown:lim,total:rowsSrc.length};}
+
+  function wire(){
+    var body=$('#svBody');
+    var cells=body.querySelectorAll('td[data-ref]');
+    for(var i=0;i<cells.length;i++){(function(td){
+      td.onclick=function(){
+        var prev=body.querySelector('td.selc');if(prev)prev.className=prev.className.replace(' selc','').replace('selc','');
+        td.className=(td.className?td.className+' ':'')+'selc';
+        setBar(td.getAttribute('data-ref'),td.getAttribute('data-f'),td.getAttribute('data-v'));};})(cells[i]);}}
+
+  function draw(tab){
+    var body=$('#svBody');
+    $('#svFxWrap').style.display=(tab==='po')?'flex':'none';
+    if(tab==='summary'){
+      setBar('','','');
+      body.innerHTML='<div class="dgrid dg21" style="margin:0">'+
+        '<div class="card" style="box-shadow:none">'+summaryTableHTML(sn)+'</div>'+
+        '<div><div class="card" style="box-shadow:none;margin-bottom:12px"><div class="dch"><h3>New vs Replenishment</h3></div><div class="dcsub">From the barcode check.</div>'+pidSplitHTML(sn)+'</div>'+
+        '<div class="card" style="box-shadow:none"><div class="dch"><h3>Review checks</h3></div>'+checksHTML(sn)+'</div></div></div>';
+      return;}
+    var t;
+    if(tab==='po')t=poTable();
+    else if(tab==='dropped')t=plainTable(sn.dropped,['SIZE COUNT','TYPE','DROP REASON']);
+    else t=plainTable(sn.original.map(function(r){return {o:r};}),[]);
+    if(!t.total){body.innerHTML='<div class="empty"><div class="big">&#9637;</div>Nothing in this tab.</div>';return;}
+    body.innerHTML='<div class="tw"><div class="tt" style="justify-content:space-between"><b>'+
+      (tab==='po'?'PO Sheet &mdash; click a blue cell to see its formula':tab==='dropped'?'Dropped rows':'Original upload')+'</b>'+
+      '<span class="pill">Showing '+t.shown+' of '+t.total+' rows</span></div>'+
+      '<div class="ts sheetview" style="max-height:44vh"><table>'+t.html+'</table></div></div>';
+    wire();}
+
+  var tabs=m.querySelectorAll('#svTabs .dtab');
+  var currentTab='po';
+  for(var i=0;i<tabs.length;i++){(function(btn){
+    btn.onclick=function(){
+      for(var j=0;j<tabs.length;j++)tabs[j].className='dtab';
+      btn.className='dtab on';
+      currentTab=btn.getAttribute('data-t');
+      draw(currentTab);};})(tabs[i]);}
+  $('#svFxAll').onchange=function(e){showAllFormulas=e.target.checked;draw(currentTab);};
+  draw('po');
+
+  var foot=$('#svFoot');
+  var dlB=el('button','btn bg','&#11015; Download Excel');
+  dlB.onclick=function(){downloadPOExcel(po);};
+  foot.appendChild(dlB);
+  if(opts.approvable&&ST.role==='planning'&&po.approval==='Pending'){
+    var rjB=el('button','btn bd','&#10005; Reject');
+    rjB.onclick=function(){closeM();planningReject(po);};
+    var apB=el('button','btn bp','&#10003; Approve this PO');
+    apB.onclick=function(){closeM();planningApprove(po);};
+    foot.appendChild(rjB);foot.appendChild(apB);
+  }else{
+    var cl=el('button','btn bp','Close');cl.onclick=closeM;foot.appendChild(cl);}}
+/* ===== DOWNLOAD FROM ANY ROLE ===== */
+function downloadPOExcel(po){
+  if(!po.sheet){toast('No sheet stored for this PO - it was raised before sheet storage was added',true);return;}
+  if(!xlsxReady()){toast('Excel library blocked by your network',true);return;}
+  buildWorkbookFromCtx(ctxFromSnapshot(po.sheet),po.poNumber);
+  logA('Downloaded Excel',ST.role.charAt(0).toUpperCase()+ST.role.slice(1),po.poNumber);}
+
+/* ===== PLANNING ACTIONS (shared by card and viewer) ===== */
+function planningApprove(po){
+  po.approval='Approved';
+  if(po.stageIdx<=1){po.stageIdx=QC_STAGE_IDX;po.stage=FLOWS[po.type][QC_STAGE_IDX];}
+  sv();logA('Approved','Planning',po.poNumber);
+  sendNotification('operations','PO Approved &middot; '+po.poNumber,
+    'PO '+po.poNumber+' for '+po.supplier+' / '+po.brand+' has been APPROVED by Planning and is moving to the next stage.');
+  renderPage();toast('Approved '+po.poNumber);}
+function planningReject(po){
+  var r=prompt('Rejection reason?');if(r==null)return;
+  po.approval='Rejected';po.rejectReason=r;sv();logA('Rejected','Planning',po.poNumber+': '+r);
+  sendNotification('operations','PO Rejected &middot; '+po.poNumber,
+    'PO '+po.poNumber+' for '+po.supplier+' / '+po.brand+' has been REJECTED by Planning.\nReason: '+r);
+  renderPage();toast('Rejected');}
 
 /* ===== WORKFLOW TRACKER ===== */
 var wfV=false;
@@ -1690,7 +2413,7 @@ function advStage(po){
 
 /* ===== PLANNING ===== */
 function pgPlanning(c){
-  c.appendChild(el('div','ph','<h1>Planning Workspace</h1><p>PO-level approval.</p>'));
+  c.appendChild(el('div','ph','<h1>Planning Workspace</h1><p>Review each request in full &mdash; summary, splits, drops and checks &mdash; then approve without downloading anything.</p>'));
   var pend=[],appr=[],rejt=[];
   for(var i=0;i<DB.pos.length;i++){var p=DB.pos[i];
     if(p.approval==='Pending'&&p.stage!=='Cancelled')pend.push(p);
@@ -1704,18 +2427,81 @@ function pgPlanning(c){
   if(!pend.length){c.appendChild(el('div','tw','<div class="empty">No pending approvals &#127881;</div>'));return;}
   for(var pi=0;pi<pend.length;pi++){
     (function(po){
-      var card=el('div','card');card.style.marginBottom='10px';var cls=po.type==='Marketplace'?'mp':'cn';
-      card.innerHTML='<div><b>'+po.poNumber+'</b> <span class="tag '+cls+'">'+po.type+'</span><br>'+
-        '<span style="color:var(--muted);font-size:12px">'+po.supplier+' &middot; '+po.brand+' &middot; '+po.territory+' &middot; '+po.currency+' '+(po.value||0).toLocaleString()+' &middot; Margin '+po.margin+'% &middot; &#128100; '+(po.buyer||'Unassigned')+'</span></div>';
-      var act=el('div','');act.style.cssText='display:flex;gap:8px;margin-top:10px;flex-wrap:wrap';
-      var ap=el('button','btn bp bs','&#10003; Approve');ap.onclick=function(){po.approval='Approved';if(po.stageIdx<=1){po.stageIdx=QC_STAGE_IDX;po.stage=FLOWS[po.type][QC_STAGE_IDX];}sv();logA('Approved','Planning',po.poNumber);
-        sendNotification('operations','PO Approved &middot; '+po.poNumber,'PO '+po.poNumber+' for '+po.supplier+' / '+po.brand+' has been APPROVED by Planning and is moving to the next stage.');
-        renderPage();toast('Approved');};
-      var rj=el('button','btn bd bs','&#10005; Reject');rj.onclick=function(){var r=prompt('Rejection reason?');if(r==null)return;po.approval='Rejected';po.rejectReason=r;sv();logA('Rejected','Planning',po.poNumber+': '+r);
-        sendNotification('operations','PO Rejected &middot; '+po.poNumber,'PO '+po.poNumber+' for '+po.supplier+' / '+po.brand+' has been REJECTED by Planning.\nReason: '+r);
-        renderPage();toast('Rejected');};
-      var rv=el('button','btn bg bs','&#8635; Revision');rv.onclick=function(){var r=prompt('Revision notes?');if(r==null)return;logA('Revision','Planning',po.poNumber+': '+r);toast('Revision noted');};
-      act.appendChild(ap);act.appendChild(rj);act.appendChild(rv);card.appendChild(act);c.appendChild(card);
+      var sn=po.sheet;
+      var cls=po.type==='Marketplace'?'mp':'cn';
+      var prioCol=po.priority==='High'?'var(--red)':po.priority==='Medium'?'var(--yel)':'var(--grn)';
+      var card=el('div','card');card.style.marginBottom='16px';
+
+      /* --- header --- */
+      var head=el('div','');head.style.cssText='display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--bdr)';
+      head.innerHTML='<div><span class="tag '+cls+'">'+po.type+'</span> <b style="font-size:15px;color:var(--pri2)">'+po.poNumber+'</b>'+
+          '<div style="color:var(--muted);font-size:12px;margin-top:4px">'+po.supplier+' &middot; '+po.brand+' &middot; '+po.territory+
+          ' &middot; '+(po.department||'&mdash;')+' &middot; &#128100; '+(po.buyer||'Unassigned')+' &middot; &#128197; '+(po.createdDate||'&mdash;')+'</div></div>'+
+        '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'+
+          '<span class="tag" style="background:'+prioCol+'1f;color:'+prioCol+'">'+po.priority+'</span>'+
+          '<span class="tag tg-pend">Awaiting your approval</span></div>';
+      card.appendChild(head);
+
+      if(!sn){
+        /* raised before sheet storage existed - fall back to the old brief card */
+        card.appendChild(el('div','','<div style="padding:11px 13px;background:rgba(232,112,58,.08);border:1px solid rgba(232,112,58,.3);border-radius:9px;font-size:12px;color:var(--acc);line-height:1.55">'+
+          '&#9888; This PO was raised before full sheet review was added, so only the headline figures are stored:<br>'+
+          '<b>'+po.currency+' '+(po.value||0).toLocaleString()+'</b> &middot; '+(po.totalOptions||0)+' options &middot; '+(po.totalQty||0).toLocaleString()+' units &middot; margin '+po.margin+'%</div>'));
+      }else{
+        /* --- KPI strip --- */
+        var t=sn.totals||{},cts=sn.counts||{};
+        var kpis=[[t.options||0,'Options','var(--pri2)','&#9685;'],
+          [cts.kept||0,'Rows in PO','var(--grn)','&#8801;'],
+          [cts.dropped||0,'Dropped',(cts.dropped?'var(--red)':'var(--grey)'),'&#8856;'],
+          [sn.hasQty?Number(t.qty||0).toLocaleString():'&mdash;','Total Qty',sn.hasQty?'var(--grn)':'var(--grey)','#'],
+          [sn.hasQty?Number(t.app||0).toFixed(2):'&mdash;','APP',sn.hasQty?'var(--acc)':'var(--grey)','&empty;'],
+          [po.margin+'%','Margin','var(--yel)','&#37;']];
+        var kgg=el('div','kgrid');kgg.style.marginBottom='14px';
+        for(var k=0;k<kpis.length;k++)kgg.appendChild(el('div','kpi',
+          '<div class="kt"><div><div class="kv" style="font-size:24px">'+kpis[k][0]+'</div><div class="kl">'+kpis[k][1]+'</div></div>'+
+          '<div class="ki" style="background:'+kpis[k][2]+'1a;color:'+kpis[k][2]+'">'+kpis[k][3]+'</div></div>'));
+        card.appendChild(kgg);
+
+        /* --- summary + splits + checks --- */
+        var grid=el('div','dgrid dg21');grid.style.marginBottom='0';
+        var left=el('div','card');left.style.cssText='box-shadow:none;background:var(--surf2)';
+        left.innerHTML='<div class="dch"><h3>Summary</h3><span class="pill">'+sn.terr+' &middot; '+sn.type+'</span></div>'+
+          '<div class="dcsub">The same block the buyer saw before submitting.</div>'+summaryTableHTML(sn);
+        var right=el('div','');
+        var splitCard=el('div','card');splitCard.style.cssText='box-shadow:none;background:var(--surf2);margin-bottom:12px';
+        splitCard.innerHTML='<div class="dch"><h3>New vs Replenishment</h3></div>'+
+          '<div class="dcsub">Barcode check against the PID master.</div>'+pidSplitHTML(sn)+
+          (cts.dropped?'<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--bdr)">'+
+            '<div style="font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;margin-bottom:6px">Dropped breakdown</div>'+
+            '<div style="font-size:12px;color:var(--muted);line-height:1.7">'+
+              (cts.lowCount?'&bull; '+cts.lowCount+' below the '+DROP_MIN_COUNT+'-size minimum<br>':'')+
+              (cts.kids?'&bull; '+cts.kids+' kids clothing<br>':'')+
+              (cts.kidsKept?'&bull; '+cts.kidsKept+' kids non-clothing <b>kept</b><br>':'')+
+              (cts.ambiguous?'&bull; '+cts.ambiguous+' kids but category unclear, <b>kept</b><br>':'')+
+            '</div></div>':'');
+        var checkCard=el('div','card');checkCard.style.cssText='box-shadow:none;background:var(--surf2)';
+        checkCard.innerHTML='<div class="dch"><h3>Review checks</h3></div>'+checksHTML(sn);
+        right.appendChild(splitCard);right.appendChild(checkCard);
+        grid.appendChild(left);grid.appendChild(right);
+        card.appendChild(grid);
+      }
+
+      /* --- actions --- */
+      var act=el('div','');act.style.cssText='display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;align-items:center';
+      if(sn){
+        var openB=el('button','btn bp','&#128202; Open sheet &amp; review');
+        openB.onclick=function(){sheetViewerModal(po,{approvable:true});};
+        act.appendChild(openB);
+        var dlB=el('button','btn bg','&#11015; Download Excel');
+        dlB.onclick=function(){downloadPOExcel(po);};
+        act.appendChild(dlB);}
+      var ap=el('button','btn bp','&#10003; Approve');ap.onclick=function(){planningApprove(po);};
+      var rj=el('button','btn bd','&#10005; Reject');rj.onclick=function(){planningReject(po);};
+      var rv=el('button','btn bg','&#8635; Revision');
+      rv.onclick=function(){var r=prompt('Revision notes?');if(r==null)return;logA('Revision','Planning',po.poNumber+': '+r);toast('Revision noted');};
+      act.appendChild(ap);act.appendChild(rj);act.appendChild(rv);
+      card.appendChild(act);
+      c.appendChild(card);
     })(pend[pi]);}}
 
 /* ===== OPERATIONS ===== */
@@ -1771,6 +2557,18 @@ function pgOperations(c){
           '<div class="f" style="flex:2;min-width:170px"><label>Comment</label><input id="icc_'+poId+'" placeholder="Type and click Add..."></div>'+
           '<button class="btn bp bs" onclick="addICComment(\''+poId+'\')">Add</button></div>';
         card.appendChild(ic);}
+      /* review + download, same sheet the buyer and planner saw */
+      var rev=el('div','');rev.style.cssText='display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center';
+      if(po.sheet){
+        var ov=el('button','btn bg bs','&#128202; Open sheet');
+        ov.onclick=function(){sheetViewerModal(po,{});};
+        var od=el('button','btn bg bs','&#11015; Download Excel');
+        od.onclick=function(){downloadPOExcel(po);};
+        rev.appendChild(ov);rev.appendChild(od);
+        rev.appendChild(el('span','pill',(po.sheet.counts.kept||0)+' rows &middot; '+(po.sheet.counts.dropped||0)+' dropped &middot; margin '+po.margin+'%'));
+      }else rev.appendChild(el('span','pill','No stored sheet for this PO'));
+      card.appendChild(rev);
+
       /* action */
       var act=el('div','');act.style.cssText='display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center';
       var curSt=flow[po.stageIdx];
@@ -2180,7 +2978,11 @@ function notifyAdd(role){
   if(!DB.prefs.notify[role])DB.prefs.notify[role]=[];
   for(var i=0;i<DB.prefs.notify[role].length;i++){if(DB.prefs.notify[role][i].email.toLowerCase()===v.toLowerCase()){toast('Already added',true);return;}}
   DB.prefs.notify[role].push({email:v,key:k});sv();renderPage();toast('Added '+v);}
-function notifyRemove(role,i){DB.prefs.notify[role].splice(i,1);sv();renderPage();toast('Removed');}
+function notifyRemove(role,i){
+  if(!DB.prefs.notify||!DB.prefs.notify[role])return;
+  var rec=DB.prefs.notify[role][i];
+  if(!rec){toast('Already removed',true);return;}
+  DB.prefs.notify[role].splice(i,1);sv();renderPage();toast('Removed '+rec.email);}
 function notifyEdit(role,elm){
   var i=parseInt(elm.getAttribute('data-i'),10);var f=elm.getAttribute('data-f');
   if(f==='email'&&!/^\S+@\S+\.\S+$/.test(elm.value.trim())){toast('Enter a valid email',true);renderPage();return;}
@@ -2631,10 +3433,15 @@ window.resetTerrCell    = resetTerrCell;
 window.engAddNotify     = engAddNotify;
 window.notifyAdd        = notifyAdd;
 window.notifyRemove     = notifyRemove;
+window.removeNotify     = removeNotify;
 window.notifyEdit       = notifyEdit;
 window.notifyTest       = notifyTest;
 window.clearPidDump     = clearPidDump;
 window.renderPage       = renderPage;
+window.sheetViewerModal = sheetViewerModal;
+window.downloadPOExcel  = downloadPOExcel;
+window.planningApprove  = planningApprove;
+window.planningReject   = planningReject;
 window.ENG              = ENG;
 
 /* ===== BOOT ===== */
